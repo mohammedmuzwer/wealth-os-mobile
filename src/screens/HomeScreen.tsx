@@ -1,4 +1,4 @@
-/**
+﻿/**
  * HomeScreen.tsx
  * 40/60 split · fixed navy header · scrollable white ledger · filter logic
  *
@@ -197,6 +197,7 @@ type NavKey  = 'home' | 'spend' | 'invest' | 'more';
 export const HomeScreen: React.FC = () => {
   const { summary, addExpense }          = useFinancials();
   const { width: screenWidth, height: screenHeight } = useWindowDimensions();
+  const scrollY = useRef(new Animated.Value(0)).current;
 
   const [activeTab,    setActiveTab]    = useState<TabKey>('Daily');
   const [activeNav,    setActiveNav]    = useState<NavKey>('home');
@@ -206,12 +207,47 @@ export const HomeScreen: React.FC = () => {
   const dailyBudgetPct = Math.max(0, Math.min(100, Math.round(100 - (summary.shieldPct ?? 0))));
   const dailySpend     = Math.round(dailyBudgetPct / 100 * dailyLimit);
 
-  // Square card size
-  const cardSize = Math.floor((screenWidth - WHITE_PAD * 2 - CARD_GAP) / 2 * 0.85);
-  const arcSize  = Math.round(cardSize * 0.38);
+  const squareOpacity = scrollY.interpolate({
+    inputRange: [0, 70, 120],
+    outputRange: [1, 0.45, 0],
+    extrapolate: 'clamp',
+  });
+  const squareTranslateY = scrollY.interpolate({
+    inputRange: [0, 120],
+    outputRange: [0, -10],
+    extrapolate: 'clamp',
+  });
+  const expandedOpacity = scrollY.interpolate({
+    inputRange: [25, 80, 120],
+    outputRange: [0, 0.9, 1],
+    extrapolate: 'clamp',
+  });
+  const expandedTranslateY = scrollY.interpolate({
+    inputRange: [25, 120],
+    outputRange: [14, 0],
+    extrapolate: 'clamp',
+  });
+  const activityHeaderOpacity = scrollY.interpolate({
+    inputRange: [0, 70, 120],
+    outputRange: [1, 0.45, 0],
+    extrapolate: 'clamp',
+  });
+  const footerTranslateY = scrollY.interpolate({
+    inputRange: [0, 100],
+    outputRange: [0, 150],
+    extrapolate: 'clamp',
+  });
+  const txLift = scrollY.interpolate({
+    inputRange: [0, 120],
+    outputRange: [0, -96],
+    extrapolate: 'clamp',
+  });
 
   // 40% of screen height for navy section
   const navHeight = Math.round(screenHeight * 0.40);
+  const cardSize = Math.floor((screenWidth - WHITE_PAD * 2 - CARD_GAP) / 2 * 0.85);
+  const arcSize  = Math.round(cardSize * 0.38);
+  const whiteSheetMinHeight = screenHeight;
 
   const METRICS = [
     { icon: '🛡️', label: 'Shield', value: `₹${dailyLimit.toLocaleString('en-IN')}`,           color: SHIELD_RED  },
@@ -222,11 +258,12 @@ export const HomeScreen: React.FC = () => {
   const transactions = TX_MAP[activeTab];
 
   return (
-    <SafeAreaView style={s.safe}>
+    <SafeAreaView style={s.mainContainer}>
       <StatusBar barStyle="light-content" backgroundColor={D.bg} />
 
       {/* ── NAVY HEADER — fixed 40% height ───────────────────────────────── */}
-      <View style={[s.navSection, { height: navHeight }]}>
+      <View style={[s.navyHeaderFixed, { height: navHeight }]}>
+        <Animated.View pointerEvents="none" style={[s.navyBlurOverlay, { opacity: scrollY.interpolate({ inputRange: [0, 200], outputRange: [0, 1], extrapolate: 'clamp' }) }]} />
 
         {/* Header row */}
         <View style={s.header}>
@@ -260,67 +297,107 @@ export const HomeScreen: React.FC = () => {
 
       </View>
 
-      {/* ── WHITE SCROLLABLE SECTION — overlaps navy by CURVE px ─────────── */}
-      <ScrollView
-        style={s.whiteScroll}
-        contentContainerStyle={s.whiteContent}
+      <Animated.ScrollView
+        style={s.whiteCardScrollLayer}
+        contentContainerStyle={{ paddingTop: navHeight - CURVE, paddingBottom: 220, flexGrow: 1 }}
+        stickyHeaderIndices={[0]}
+        scrollEventThrottle={16}
+        onScroll={Animated.event(
+          [{ nativeEvent: { contentOffset: { y: scrollY } } }],
+          { useNativeDriver: true },
+        )}
         showsVerticalScrollIndicator={false}
+        bounces={false}
+        alwaysBounceVertical={false}
+        overScrollMode="never"
       >
+        <View style={s.stickySheetHeader}>
+            <View style={s.sheetHandle} />
 
-        {/* Square action cards */}
-        <View style={s.actionGrid}>
-
-          {/* Daily Budget */}
-          <View style={[s.budgetCard, { width: cardSize, height: cardSize }]}>
-            <View style={s.budgetTop}>
-              <View style={s.heartBadge}><Text style={s.heartIcon}>💗</Text></View>
-              <BudgetArc size={arcSize} />
-            </View>
-            <View style={s.budgetBottom}>
-              <Text style={s.cardLabel}>DAILY BUDGET</Text>
-              <View style={s.ratioRow}>
-                <Text style={s.ratioSpend}>₹{dailySpend.toLocaleString('en-IN')}</Text>
-                <Text style={s.ratioLimit}> / {dailyLimit.toLocaleString('en-IN')}</Text>
+            <Animated.View style={[s.actionGrid, { marginTop: 20, opacity: squareOpacity, transform: [{ translateY: squareTranslateY }] }]}>
+              <View style={[s.budgetCard, { width: cardSize, height: cardSize }]}>
+                <View style={s.budgetTop}>
+                  <View style={s.heartBadge}><Text style={s.heartIcon}>💗</Text></View>
+                  <BudgetArc size={arcSize} />
+                </View>
+                <View style={s.budgetBottom}>
+                  <Text style={s.cardLabel}>DAILY BUDGET</Text>
+                  <View style={s.ratioRow}>
+                    <Text style={s.ratioSpend}>₹{dailySpend.toLocaleString('en-IN')}</Text>
+                    <Text style={s.ratioLimit}> / {dailyLimit.toLocaleString('en-IN')}</Text>
+                  </View>
+                </View>
               </View>
-            </View>
-          </View>
 
-          {/* Vault Sweep */}
-          <View style={[s.vaultCard, { width: cardSize, height: cardSize }]}>
-            <View style={s.vaultTopRow}>
-              <View style={s.vaultIndicator}><Text style={{ fontSize: 13 }}>💛</Text></View>
-              <TouchableOpacity style={s.sweepPill} activeOpacity={0.85}>
-                <Text style={s.sweepPillIcon}>◎</Text>
-                <Text style={s.sweepPillTxt}>SWEEP{'\n'}TO VAULT</Text>
-              </TouchableOpacity>
-            </View>
-            <View style={s.vaultBottom}>
-              <Text style={s.vaultLabel}>VAULT SWEEP</Text>
-              <Text style={s.vaultAmount}>₹300</Text>
-              <Text style={s.vaultSub}>UNSPENT</Text>
-            </View>
-          </View>
+              <View style={[s.vaultCard, { width: cardSize, height: cardSize }]}>
+                <View style={s.vaultTopRow}>
+                  <View style={s.vaultIndicator}><Text style={{ fontSize: 13 }}>💛</Text></View>
+                  <TouchableOpacity style={s.sweepPill} activeOpacity={0.85}>
+                    <Text style={s.sweepPillIcon}>◎</Text>
+                    <Text style={s.sweepPillTxt}>SWEEP{'\n'}TO VAULT</Text>
+                  </TouchableOpacity>
+                </View>
+                <View style={s.vaultBottom}>
+                  <Text style={s.vaultLabel}>VAULT SWEEP</Text>
+                  <Text style={s.vaultAmount}>₹300</Text>
+                  <Text style={s.vaultSub}>UNSPENT</Text>
+                </View>
+              </View>
+            </Animated.View>
 
+            <Animated.View pointerEvents="none" style={[s.expandedPillStrip, { marginTop: 20, opacity: expandedOpacity, transform: [{ translateY: expandedTranslateY }] }]}>
+              <View style={[s.expandedPillCard, s.expandedPillCardDark]}>
+                <View style={s.expandedPillIconWrap}><Text style={s.expandedPillIcon}>💗</Text></View>
+                <View style={s.expandedPillCopy}>
+                  <Text style={s.expandedPillLabel}>DAILY BUDGET</Text>
+                  <Text style={s.expandedPillAmount}>
+                    <Text style={s.expandedPillAmountStrong}>220</Text>
+                    <Text style={s.expandedPillAmountSoft}>/500</Text>
+                  </Text>
+                </View>
+              </View>
+
+              <View style={[s.expandedPillCard, s.expandedPillCardDark]}>
+                <View style={s.expandedPillIconWrapYellow}><Text style={s.expandedPillIconDark}>💛</Text></View>
+                <View style={s.expandedPillCopy}>
+                  <Text style={s.expandedPillLabel}>VAULT SWEEP</Text>
+                  <Text style={s.expandedPillAmount}>
+                    <Text style={s.expandedPillAmountStrong}>₹300</Text>
+                  </Text>
+                </View>
+              </View>
+            </Animated.View>
+
+            <Animated.View pointerEvents="none" style={[s.expandedActivityOverlay, { opacity: expandedOpacity }]}>
+              <Text style={s.expandedActivityTitle}>Recent Activity</Text>
+              <View style={s.expandedTabStrip}>
+                {(['Daily', 'Weekly', 'Monthly'] as TabKey[]).map(tab => (
+                  <View key={tab} style={[s.expandedTab, activeTab === tab && s.expandedTabActive]}>
+                    <Text style={[s.expandedTabTxt, activeTab === tab && s.expandedTabTxtActive]}>{tab}</Text>
+                  </View>
+                ))}
+              </View>
+            </Animated.View>
+
+            <Animated.View style={{ opacity: activityHeaderOpacity }}>
+              <View style={s.activityHeader}>
+                <Text style={s.activityTitle}>Recent Activity</Text>
+                <View style={s.tabStrip}>
+                  {(['Daily', 'Weekly', 'Monthly'] as TabKey[]).map(tab => (
+                    <TouchableOpacity
+                      key={tab}
+                      style={[s.tab, activeTab === tab && s.tabActive]}
+                      onPress={() => setActiveTab(tab)}
+                    >
+                      <Text style={[s.tabTxt, activeTab === tab && s.tabTxtActive]}>{tab}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </View>
+            </Animated.View>
         </View>
 
-        {/* Recent Activity header — title + filter tabs on same row */}
-        <View style={s.activityHeader}>
-          <Text style={s.activityTitle}>Recent Activity</Text>
-          <View style={s.tabStrip}>
-            {(['Daily', 'Weekly', 'Monthly'] as TabKey[]).map(tab => (
-              <TouchableOpacity
-                key={tab}
-                style={[s.tab, activeTab === tab && s.tabActive]}
-                onPress={() => setActiveTab(tab)}
-              >
-                <Text style={[s.tabTxt, activeTab === tab && s.tabTxtActive]}>{tab}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        </View>
-
-        {/* Filtered transaction list */}
-        <View>
+        <Animated.View style={[s.txList, { minHeight: whiteSheetMinHeight, transform: [{ translateY: txLift }] }]}>
           {transactions.map((tx, i) => (
             <View key={tx.id} style={[s.txRow, i < transactions.length - 1 && s.txDivider]}>
               <View style={[s.txIcon, { backgroundColor: tx.iconBg }]}>
@@ -335,12 +412,13 @@ export const HomeScreen: React.FC = () => {
               </Text>
             </View>
           ))}
-        </View>
 
-        <View style={{ height: 90 }} />
-      </ScrollView>
+          <View style={{ height: 90 }} />
+        </Animated.View>
+      </Animated.ScrollView>
 
       {/* ── TAB BAR ───────────────────────────────────────────────────────── */}
+      <Animated.View style={[s.floatingFooter, { transform: [{ translateY: footerTranslateY }] }]} pointerEvents="box-none">
       <View style={s.tabBar}>
         <NavItem icon="⌂"  label="Home"   active={activeNav === 'home'}   onPress={() => setActiveNav('home')}   />
         <NavItem icon="💳" label="Spend"  active={activeNav === 'spend'}  onPress={() => setActiveNav('spend')}  />
@@ -354,6 +432,7 @@ export const HomeScreen: React.FC = () => {
           </TouchableOpacity>
         </View>
       </View>
+      </Animated.View>
 
       <ExpenseInputSheet visible={sheetVisible} onClose={() => setSheetVisible(false)} onSubmit={addExpense} />
     </SafeAreaView>
@@ -363,13 +442,19 @@ export const HomeScreen: React.FC = () => {
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
 const s = StyleSheet.create({
-
+  mainContainer: { flex: 1, backgroundColor: D.bg },
   safe: { flex: 1, backgroundColor: '#FFFFFF' },
 
   // ── Navy section — fixed 40% height, content distributed vertically ──────
-  navSection: {
+  navyHeaderFixed: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    zIndex: -1,
+    elevation: 0,
     backgroundColor: D.bg,
-    paddingTop: 16,
+    paddingTop: 50,
     paddingBottom: 0,
     justifyContent: 'space-between',
   },
@@ -412,56 +497,256 @@ const s = StyleSheet.create({
   insightArrow: { fontSize: 20, color: D.muted, fontWeight: '300' },
 
   // ── White scroll — overlaps navy by CURVE px ──────────────────────────────
-  whiteScroll: {
+  whiteCardScrollLayer: {
     flex: 1,
+    backgroundColor: 'transparent',
+    zIndex: 10,
+    elevation: 10,
+  },
+  stickySheetHeader: {
+    backgroundColor: '#FFFFFF',
+    paddingHorizontal: WHITE_PAD,
+    paddingTop: 20,
+    paddingBottom: 0,
+    borderTopLeftRadius: 36,
+    borderTopRightRadius: 36,
+    overflow: 'hidden',
+  },
+  whiteCardContent: {
     backgroundColor: '#FFFFFF',
     borderTopLeftRadius: 36,
     borderTopRightRadius: 36,
-    marginTop: -CURVE,
-  },
-  whiteContent: {
-    paddingTop: 20,
+    overflow: 'hidden',
     paddingHorizontal: WHITE_PAD,
+    paddingTop: 20,
+    paddingBottom: 220,
+  },
+  sheetHandle: {
+    alignSelf: 'center',
+    width: 34,
+    height: 4,
+    borderRadius: 999,
+    backgroundColor: '#D9DAE7',
+    marginBottom: 12,
   },
 
-  // ── Action grid ───────────────────────────────────────────────────────────
-  actionGrid: { flexDirection: 'row', gap: CARD_GAP, marginBottom: 22, justifyContent: 'center' },
-
+  // ── Action pills ──────────────────────────────────────────────────────────
+  actionGrid: { flexDirection: 'row', gap: CARD_GAP, marginBottom: 20, justifyContent: 'center' },
   budgetCard: {
-    backgroundColor: D.card, borderRadius: RADIUS_LG,
-    padding: 14, justifyContent: 'space-between', overflow: 'hidden',
-    shadowColor: '#000', shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.22, shadowRadius: 8, elevation: 6,
+    backgroundColor: D.card,
+    borderRadius: RADIUS_LG,
+    padding: 14,
+    justifyContent: 'space-between',
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.22,
+    shadowRadius: 8,
+    elevation: 6,
   },
-  budgetTop:    { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' },
-  heartBadge:   { width: 32, height: 32, borderRadius: 10, backgroundColor: 'rgba(255,255,255,0.08)', alignItems: 'center', justifyContent: 'center' },
-  heartIcon:    { fontSize: 16 },
+  budgetTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' },
+  heartBadge: { width: 32, height: 32, borderRadius: 10, backgroundColor: 'rgba(255,255,255,0.08)', alignItems: 'center', justifyContent: 'center' },
+  heartIcon: { fontSize: 16 },
   budgetBottom: { gap: 2 },
-  cardLabel:    { fontSize: 9, fontWeight: '800', color: D.muted, letterSpacing: 1 },
-  ratioRow:     { flexDirection: 'row', alignItems: 'baseline' },
-  ratioSpend:   { fontSize: 28, fontWeight: '900', color: '#FFFFFF', letterSpacing: -1, fontFamily: FONT_MONO as string },
-  ratioLimit:   { fontSize: 14, fontWeight: '600', color: 'rgba(255,255,255,0.38)', fontFamily: FONT_MONO as string },
+  cardLabel: { fontSize: 9, fontWeight: '800', color: D.muted, letterSpacing: 1 },
+  ratioRow: { flexDirection: 'row', alignItems: 'baseline' },
+  ratioSpend: { fontSize: 28, fontWeight: '900', color: '#FFFFFF', letterSpacing: -1, fontFamily: FONT_MONO as string },
+  ratioLimit: { fontSize: 14, fontWeight: '600', color: 'rgba(255,255,255,0.38)', fontFamily: FONT_MONO as string },
 
   vaultCard: {
-    backgroundColor: CYBER_YELLOW, borderRadius: RADIUS_LG,
-    padding: 14, justifyContent: 'space-between',
-    shadowColor: CYBER_YELLOW, shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3, shadowRadius: 8, elevation: 6,
+    backgroundColor: CYBER_YELLOW,
+    borderRadius: RADIUS_LG,
+    padding: 14,
+    justifyContent: 'space-between',
+    shadowColor: CYBER_YELLOW,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 6,
   },
-  vaultTopRow:    { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  vaultTopRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   vaultIndicator: { width: 28, height: 28, borderRadius: 14, backgroundColor: 'rgba(0,0,0,0.12)', alignItems: 'center', justifyContent: 'center' },
-  sweepPill:      { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: CYBER_YELLOW, borderRadius: 50, borderWidth: 1.5, borderColor: 'rgba(0,0,0,0.20)', paddingHorizontal: 8, paddingVertical: 5 },
-  sweepPillIcon:  { fontSize: 11, color: '#1A1005' },
-  sweepPillTxt:   { fontSize: 7, fontWeight: '900', color: '#1A1005', letterSpacing: 0.4, lineHeight: 9 },
-  vaultBottom:    { gap: 1 },
-  vaultLabel:     { fontSize: 9, fontWeight: '800', color: 'rgba(0,0,0,0.5)', letterSpacing: 1 },
-  vaultAmount:    { fontSize: 26, fontWeight: '900', color: '#1A1005', letterSpacing: -1, fontFamily: FONT_MONO as string },
-  vaultSub:       { fontSize: 9, fontWeight: '700', color: 'rgba(0,0,0,0.45)', letterSpacing: 0.5 },
+  sweepPill: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: CYBER_YELLOW, borderRadius: 50, borderWidth: 1.5, borderColor: 'rgba(0,0,0,0.20)', paddingHorizontal: 8, paddingVertical: 5 },
+  sweepPillIcon: { fontSize: 11, color: '#1A1005' },
+  sweepPillTxt: { fontSize: 7, fontWeight: '900', color: '#1A1005', letterSpacing: 0.4, lineHeight: 9 },
+  vaultBottom: { gap: 1 },
+  vaultLabel: { fontSize: 9, fontWeight: '800', color: 'rgba(0,0,0,0.5)', letterSpacing: 1 },
+  vaultAmount: { fontSize: 26, fontWeight: '900', color: '#1A1005', letterSpacing: -1, fontFamily: FONT_MONO as string },
+  vaultSub: { fontSize: 9, fontWeight: '700', color: 'rgba(0,0,0,0.45)', letterSpacing: 0.5 },
+
+  budgetPill: {
+    flex: 1,
+    minHeight: 92,
+    backgroundColor: D.card,
+    borderRadius: 24,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    justifyContent: 'space-between',
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.18,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  vaultPill: {
+    flex: 1,
+    minHeight: 92,
+    backgroundColor: CYBER_YELLOW,
+    borderRadius: 24,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    justifyContent: 'space-between',
+    overflow: 'hidden',
+    shadowColor: CYBER_YELLOW,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.22,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  pillTopLine: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' },
+  pillBottomLine: { gap: 2 },
+  pillIconBadge: { width: 30, height: 30, borderRadius: 10, backgroundColor: 'rgba(255,255,255,0.06)', alignItems: 'center', justifyContent: 'center' },
+  pillIconBadgeYellow: { width: 30, height: 30, borderRadius: 10, backgroundColor: 'rgba(0,0,0,0.14)', alignItems: 'center', justifyContent: 'center' },
+  pillIcon: { fontSize: 15 },
+  pillIconDark: { fontSize: 15 },
+  pillLabel: { fontSize: 9, fontWeight: '800', color: D.muted, letterSpacing: 1 },
+  pillValue: { flexDirection: 'row', alignItems: 'baseline' },
+  pillValueStrong: { fontSize: 27, fontWeight: '900', color: '#FFFFFF', letterSpacing: -1, fontFamily: FONT_MONO as string },
+  pillValueMuted: { fontSize: 14, fontWeight: '600', color: 'rgba(255,255,255,0.38)', fontFamily: FONT_MONO as string },
+  sweepChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: CYBER_YELLOW,
+    borderRadius: 999,
+    borderWidth: 1.5,
+    borderColor: 'rgba(0,0,0,0.18)',
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+  },
+  sweepChipIcon: { fontSize: 11, color: '#1A1005' },
+  sweepChipText: { fontSize: 7, fontWeight: '900', color: '#1A1005', letterSpacing: 0.4, lineHeight: 9 },
+  vaultPillLabel: { fontSize: 9, fontWeight: '800', color: 'rgba(0,0,0,0.55)', letterSpacing: 1 },
+  vaultPillAmount: { fontSize: 26, fontWeight: '900', color: '#1A1005', letterSpacing: -1, fontFamily: FONT_MONO as string },
+  vaultPillSub: { fontSize: 9, fontWeight: '700', color: 'rgba(0,0,0,0.45)', letterSpacing: 0.5 },
+  expandedPillStrip: {
+    position: 'absolute',
+    top: 18,
+    left: WHITE_PAD,
+    right: WHITE_PAD,
+    flexDirection: 'row',
+    gap: CARD_GAP,
+    zIndex: 20,
+    elevation: 20,
+  },
+  expandedPillCard: {
+    flex: 1,
+    minHeight: 58,
+    borderRadius: 999,
+    paddingHorizontal: 16,
+    paddingVertical: 11,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  expandedPillCardDark: {
+    backgroundColor: '#1A1A2E',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.18,
+    shadowRadius: 7,
+    elevation: 4,
+  },
+  expandedPillIconWrap: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: 'rgba(6,182,212,0.18)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  expandedPillIconWrapYellow: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255,215,0,0.20)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  expandedPillIcon: { fontSize: 12 },
+  expandedPillIconDark: { fontSize: 12 },
+  expandedPillCopy: { flex: 1, gap: 2 },
+  expandedPillLabel: {
+    fontSize: 9,
+    fontWeight: '800',
+    color: 'rgba(255,255,255,0.50)',
+    letterSpacing: 1,
+  },
+  expandedPillAmount: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+  },
+  expandedPillAmountStrong: {
+    fontSize: 19,
+    fontWeight: '900',
+    color: '#FFFFFF',
+    letterSpacing: -0.5,
+    fontFamily: FONT_MONO as string,
+  },
+  expandedPillAmountSoft: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: 'rgba(255,255,255,0.55)',
+    marginLeft: 2,
+    fontFamily: FONT_MONO as string,
+  },
+  expandedActivityOverlay: {
+    position: 'absolute',
+    top: 110,
+    left: WHITE_PAD,
+    right: WHITE_PAD,
+    alignItems: 'center',
+    zIndex: 18,
+    elevation: 18,
+  },
+  expandedActivityTitle: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: TEXT_PRIMARY,
+    letterSpacing: -0.3,
+    textAlign: 'center',
+    marginBottom: 16,
+  },
+  expandedTabStrip: {
+    flexDirection: 'row',
+    backgroundColor: '#EDEDF5',
+    borderRadius: RADIUS_PILL,
+    padding: 4,
+    justifyContent: 'center',
+    alignSelf: 'center',
+  },
+  expandedTab: {
+    alignItems: 'center',
+    paddingVertical: 7,
+    paddingHorizontal: 15,
+    borderRadius: RADIUS_PILL,
+  },
+  expandedTabActive: {
+    backgroundColor: '#FFFFFF',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 3,
+    elevation: 2,
+  },
+  expandedTabTxt: { fontSize: 13, fontWeight: '600', color: TEXT_MUTED },
+  expandedTabTxtActive: { color: TEXT_PRIMARY, fontWeight: '800' },
 
   // ── Recent Activity ───────────────────────────────────────────────────────
   activityHeader: {
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-    marginBottom: 14,
+    marginBottom: 4,
   },
   activityTitle: { fontSize: 17, fontWeight: '800', color: TEXT_PRIMARY, letterSpacing: -0.3 },
 
@@ -479,8 +764,22 @@ const s = StyleSheet.create({
   txName:    { fontSize: 14, fontWeight: '700', color: TEXT_PRIMARY },
   txSub:     { fontSize: 11, color: TEXT_MUTED, fontWeight: '500' },
   txAmt:     { fontSize: 14, fontWeight: '800', letterSpacing: -0.3, fontFamily: FONT_MONO as string },
+  txList: {
+    backgroundColor: '#FFFFFF',
+    paddingHorizontal: WHITE_PAD,
+    paddingTop: 0,
+  },
 
   // ── Tab bar ───────────────────────────────────────────────────────────────
+  floatingFooter: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: 'transparent',
+    zIndex: 999,
+    elevation: 50,
+  },
   tabBar: {
     position: 'absolute', bottom: 0, left: 0, right: 0,
     flexDirection: 'row', alignItems: 'flex-end',
@@ -509,5 +808,46 @@ const s = StyleSheet.create({
     shadowOpacity: 0.6, shadowRadius: 18, elevation: 16,
   },
   fabIcon: { fontSize: 34, color: '#FFFFFF', fontWeight: '300', lineHeight: 38, marginTop: -2 },
+
+  navyBlurOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(10, 20, 35, 0.75)',
+  },
+
+  stickyHeader: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    zIndex: 30,
+    elevation: 30,
+    backgroundColor: '#FFFFFF',
+    paddingTop: 50,
+    paddingHorizontal: WHITE_PAD,
+    paddingBottom: 10,
+  },
+  stickyInner: {
+    alignItems: 'center',
+  },
+  stickyChip: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 999,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderWidth: 1,
+    borderColor: '#EAEAF2',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 6,
+    elevation: 2,
+  },
+  stickyChipText: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: TEXT_PRIMARY,
+    letterSpacing: -0.2,
+    fontFamily: FONT_MONO as string,
+  },
 
 });
