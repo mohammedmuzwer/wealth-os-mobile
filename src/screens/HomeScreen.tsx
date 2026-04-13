@@ -198,6 +198,8 @@ export const HomeScreen: React.FC = () => {
   const { summary, addExpense }          = useFinancials();
   const { width: screenWidth, height: screenHeight } = useWindowDimensions();
   const scrollY = useRef(new Animated.Value(0)).current;
+  /** Let expanded activity tabs receive touches only when sheet is scrolled up (opacity > 0). */
+  const [sheetExpandedForInput, setSheetExpandedForInput] = useState(false);
 
   const [activeTab,    setActiveTab]    = useState<TabKey>('Daily');
   const [activeNav,    setActiveNav]    = useState<NavKey>('home');
@@ -206,6 +208,15 @@ export const HomeScreen: React.FC = () => {
   const dailyLimit     = Math.round(summary.income > 0 ? summary.income * 0.1 / 30 : 0);
   const dailyBudgetPct = Math.max(0, Math.min(100, Math.round(100 - (summary.shieldPct ?? 0))));
   const dailySpend     = Math.round(dailyBudgetPct / 100 * dailyLimit);
+  const navHeight      = Math.round(screenHeight * 0.40);
+
+  useEffect(() => {
+    const id = scrollY.addListener(({ value }) => {
+      const next = value > 72;
+      setSheetExpandedForInput(prev => (prev === next ? prev : next));
+    });
+    return () => scrollY.removeListener(id);
+  }, [scrollY]);
 
   const squareOpacity = scrollY.interpolate({
     inputRange: [0, 70, 120],
@@ -237,17 +248,9 @@ export const HomeScreen: React.FC = () => {
     outputRange: [0, 150],
     extrapolate: 'clamp',
   });
-  const txLift = scrollY.interpolate({
-    inputRange: [0, 120],
-    outputRange: [0, -96],
-    extrapolate: 'clamp',
-  });
 
-  // 40% of screen height for navy section
-  const navHeight = Math.round(screenHeight * 0.40);
   const cardSize = Math.floor((screenWidth - WHITE_PAD * 2 - CARD_GAP) / 2 * 0.85);
   const arcSize  = Math.round(cardSize * 0.38);
-  const whiteSheetMinHeight = screenHeight;
 
   const METRICS = [
     { icon: '🛡️', label: 'Shield', value: `₹${dailyLimit.toLocaleString('en-IN')}`,           color: SHIELD_RED  },
@@ -299,12 +302,16 @@ export const HomeScreen: React.FC = () => {
 
       <Animated.ScrollView
         style={s.whiteCardScrollLayer}
-        contentContainerStyle={{ paddingTop: navHeight - CURVE, paddingBottom: 220, flexGrow: 1 }}
+        contentContainerStyle={{
+          paddingTop: navHeight - CURVE,
+          paddingBottom: 0,
+          flexGrow: 1,
+        }}
         stickyHeaderIndices={[0]}
         scrollEventThrottle={16}
         onScroll={Animated.event(
           [{ nativeEvent: { contentOffset: { y: scrollY } } }],
-          { useNativeDriver: true },
+          { useNativeDriver: false },
         )}
         showsVerticalScrollIndicator={false}
         bounces={false}
@@ -368,13 +375,21 @@ export const HomeScreen: React.FC = () => {
               </View>
             </Animated.View>
 
-            <Animated.View pointerEvents="none" style={[s.expandedActivityOverlay, { opacity: expandedOpacity }]}>
+            <Animated.View
+              pointerEvents={sheetExpandedForInput ? 'box-none' : 'none'}
+              style={[s.expandedActivityOverlay, { opacity: expandedOpacity }]}
+            >
               <Text style={s.expandedActivityTitle}>Recent Activity</Text>
               <View style={s.expandedTabStrip}>
                 {(['Daily', 'Weekly', 'Monthly'] as TabKey[]).map(tab => (
-                  <View key={tab} style={[s.expandedTab, activeTab === tab && s.expandedTabActive]}>
+                  <TouchableOpacity
+                    key={tab}
+                    activeOpacity={0.75}
+                    style={[s.expandedTab, activeTab === tab && s.expandedTabActive]}
+                    onPress={() => setActiveTab(tab)}
+                  >
                     <Text style={[s.expandedTabTxt, activeTab === tab && s.expandedTabTxtActive]}>{tab}</Text>
-                  </View>
+                  </TouchableOpacity>
                 ))}
               </View>
             </Animated.View>
@@ -397,7 +412,7 @@ export const HomeScreen: React.FC = () => {
             </Animated.View>
         </View>
 
-        <Animated.View style={[s.txList, { minHeight: whiteSheetMinHeight, transform: [{ translateY: txLift }] }]}>
+        <Animated.View style={s.txList}>
           {transactions.map((tx, i) => (
             <View key={tx.id} style={[s.txRow, i < transactions.length - 1 && s.txDivider]}>
               <View style={[s.txIcon, { backgroundColor: tx.iconBg }]}>
@@ -415,6 +430,9 @@ export const HomeScreen: React.FC = () => {
 
           <View style={{ height: 90 }} />
         </Animated.View>
+
+        {/* Solid white tail for tab bar clearance — avoids painting paddingTop (navy peek) white */}
+        <View style={{ height: 220, backgroundColor: '#FFFFFF' }} />
       </Animated.ScrollView>
 
       {/* ── TAB BAR ───────────────────────────────────────────────────────── */}
