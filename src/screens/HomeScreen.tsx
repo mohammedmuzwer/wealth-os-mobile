@@ -1,32 +1,65 @@
 ﻿/**
  * HomeScreen.tsx
- * 40/60 split · fixed navy header · scrollable white ledger · filter logic
+ * Navy hero (fixed) + scroll layer with transparent spacer → sticky white header → ledger.
  *
- * Layout:
- *  ╔═══════════════════════════╗  NAVY  40% of screen height (fixed)
- *  ║  Header + Rings + Pill    ║
- *  ║          ╭────────────────╫─── curve overlap (CURVE px)
- *  ╔══════════╝                ║
- *  ║  WHITE  60% + scrollable  ║  ← action grid + filtered ledger
- *  ╚═══════════════════════════╝
- *  ━━━━ slim dark tab bar ━━━━
+ * Scroll architecture: index 0 = transparent spacer = navy band height minus curve overlap
+ * (30% screen ≈ visible rings on load); index 1 = sticky white sheet (~70% region); index 2 = list.
+ * Scroll-driven UI band ≈ 20% screen height.
  */
 
-import React, { useRef, useEffect, useState } from 'react';
+import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import {
-  View, Text, ScrollView, StyleSheet, SafeAreaView,
-  StatusBar, TouchableOpacity, Animated, useWindowDimensions,
+  View, Text, StyleSheet, SafeAreaView,
+  StatusBar, TouchableOpacity, Animated, useWindowDimensions, Dimensions,
+  Modal, Pressable, TextInput, Switch, Platform, PanResponder,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Circle, G } from 'react-native-svg';
 import { useFinancials } from '../hooks/useFinancials';
-import { ExpenseInputSheet } from '../components/ExpenseInputSheet';
+import { DailyBudgetCard } from '../components/DailyBudgetCard';
 import {
   SHIELD_RED, BUILD_GREEN, VAULT_GOLD, PURPLE, NAVY,
   TEXT_PRIMARY, TEXT_MUTED,
   getTierColor, getTierLabel,
   FONT_MONO, RADIUS_LG, RADIUS_PILL,
 } from '../theme/tokens';
-import { fmt } from '../utils/finance';
+import { fmt, type ExpenseCategory } from '../utils/finance';
+
+/** Log modal — light theme tokens. */
+const EXP_MODAL_VIOLET   = '#7C3AED';
+const EXP_MODAL_NAVY     = '#1A1A2E';
+const EXP_MODAL_GRAY_BG  = '#F3F4F6';
+const EXP_MODAL_KEYPAD   = '#F9FAFB';
+const EXP_MODAL_BORDER   = '#E5E7EB';
+const EXP_MODAL_ACTIVE_BG = '#EDE9FE';
+const EXP_MODAL_PLACEHOLDER = '#9CA3AF';
+
+const EXPENSE_MODAL_CATEGORIES: { id: string; icon: string; label: string }[] = [
+  { id: 'food', icon: '🍔', label: 'Food' },
+  { id: 'coffee', icon: '☕', label: 'Coffee' },
+  { id: 'auto', icon: '🚗', label: 'Auto' },
+  { id: 'netflix', icon: '🍿', label: 'Netflix' },
+  { id: 'tech', icon: '💻', label: 'Tech' },
+  { id: 'internet', icon: '🌐', label: 'Internet' },
+  { id: 'more', icon: '➕', label: 'More' },
+];
+
+/** Map UI tags → persisted ExpenseCategory. */
+const MODAL_TAG_TO_EXPENSE: Record<string, ExpenseCategory> = {
+  food: 'food',
+  coffee: 'food',
+  auto: 'petrol',
+  netflix: 'other',
+  tech: 'shopping',
+  internet: 'other',
+};
+
+const KEYPAD_ROWS: string[][] = [
+  ['1', '2', '3'],
+  ['4', '5', '6'],
+  ['7', '8', '9'],
+  ['.', '0', '<'],
+];
 
 // ─── Palette ──────────────────────────────────────────────────────────────────
 const D = {
@@ -34,43 +67,51 @@ const D = {
   card:  '#161B27',
   muted: 'rgba(255,255,255,0.42)',
 };
-const TEAL         = '#06B6D4';
+const TEAL         = '#22D3EE';
 const CYBER_YELLOW = '#FFD700';
 
 // ─── Layout constants ─────────────────────────────────────────────────────────
-const HERO_S    = 168;   // -10% from 187
-const HERO_STR  = 15;
-const HERO_GAP  = 0;    // flush — zero gap between concentric rings
+const HERO_S    = 140;   // Figma parity
+const HERO_STR  = 12;
+const HERO_GAP  = 2;     // crisp visual ring gap
 const CURVE     = 28;    // white section overlaps navy by this many px
 const WHITE_PAD = 20;
 const CARD_GAP  = 12;
 
-// ─── Transaction data — three filter datasets ────────────────────────────────
+
+/** Scroll distance (px) for expand/collapse animations ≈ 20% of screen height */
+const scrollAnimSpanPx = (screenH: number) =>
+  Math.max(96, Math.round(screenH * 0.2));
+
+/** Uniform vertical rhythm: handle ↔ grid ↔ section titles (px) */
+const SHEET_SECTION_GAP = 14;
+const SHEET_HANDLE_H = 4;
+const EXPANDED_PILL_ROW_MIN = 58;
+/** Absolute overlay Y positions inside sticky sheet (content coordinates) */
+const EXPANDED_PILLS_TOP = SHEET_HANDLE_H + SHEET_SECTION_GAP;
+const EXPANDED_ACTIVITY_TOP = EXPANDED_PILLS_TOP + EXPANDED_PILL_ROW_MIN + SHEET_SECTION_GAP;
+
+// ─── Dummy ledger (12 items) ────────────────────────────────────────────────
 
 interface Tx {
   id: string; emoji: string; iconBg: string;
   name: string; sub: string; amount: number; positive: boolean;
 }
 
-const DAILY_TXS: Tx[] = [
-  { id: 'd1', emoji: '☕', iconBg: '#FEF3E8', name: 'Costa Coffee',    sub: '08:30 AM · Café',      amount: 320,  positive: false },
-  { id: 'd2', emoji: '🍱', iconBg: '#E8F0FE', name: 'Lunch — Zomato', sub: '01:15 PM · Food',      amount: 450,  positive: false },
-  { id: 'd3', emoji: '⛽', iconBg: '#F0E8FE', name: 'BPCL Fuel',      sub: '06:45 PM · Transport', amount: 1200, positive: false },
+const DUMMY_TRANSACTIONS: Tx[] = [
+  { id: '1',  emoji: '☕', iconBg: '#FEF3E8', name: 'Costa Coffee',    sub: '08:30 AM · Café',          amount: 320,  positive: false },
+  { id: '2',  emoji: '🍱', iconBg: '#E8F0FE', name: 'Zomato',          sub: '01:15 PM · Food',          amount: 450,  positive: false },
+  { id: '3',  emoji: '⛽', iconBg: '#F0E8FE', name: 'BPCL Fuel',       sub: '06:45 PM · Transport',     amount: 1200, positive: false },
+  { id: '4',  emoji: '🚌', iconBg: '#E8F8F0', name: 'Metro Recharge',  sub: '09:00 AM · Transport',     amount: 200,  positive: false },
+  { id: '5',  emoji: '☕', iconBg: '#FEF3E8', name: 'Starbucks',       sub: '10:20 AM · Café',          amount: 380,  positive: false },
+  { id: '6',  emoji: '🥪', iconBg: '#FFF8E8', name: 'Subway',          sub: '12:45 PM · Food',          amount: 290,  positive: false },
+  { id: '7',  emoji: '📱', iconBg: '#E8E8FE', name: 'Mobile Prepaid',  sub: '02:10 PM · Utilities',     amount: 499,  positive: false },
+  { id: '8',  emoji: '🏪', iconBg: '#F0FEE8', name: 'Quick Mart',      sub: '04:30 PM · Shopping',      amount: 160,  positive: false },
+  { id: '9',  emoji: '🍜', iconBg: '#FEE8F0', name: 'Swiggy',          sub: '08:00 PM · Food',          amount: 520,  positive: false },
+  { id: '10', emoji: '🎬', iconBg: '#E8F0FE', name: 'Movie Tickets',   sub: '09:15 PM · Entertainment', amount: 850,  positive: false },
+  { id: '11', emoji: '🚗', iconBg: '#E8E8FE', name: 'Uber',            sub: '07:20 PM · Transport',     amount: 340,  positive: false },
+  { id: '12', emoji: '🛒', iconBg: '#FEF3E8', name: 'DMart',           sub: 'Sat · Groceries',          amount: 2840, positive: false },
 ];
-
-const WEEKLY_TXS: Tx[] = [
-  { id: 'w1', emoji: '🛒', iconBg: '#FEF3E8', name: 'DMart Groceries', sub: 'Mon · Groceries',     amount: 3200, positive: false },
-  { id: 'w2', emoji: '📺', iconBg: '#E8F0FE', name: 'Netflix',         sub: 'Wed · Subscription',  amount: 649,  positive: false },
-  { id: 'w3', emoji: '🍽️', iconBg: '#F0E8FE', name: 'Weekend Dinner',  sub: 'Sat · Restaurant',   amount: 2100, positive: false },
-];
-
-const MONTHLY_TXS: Tx[] = [
-  { id: 'm1', emoji: '💰', iconBg: '#E8F0FE', name: 'Salary Deposit',  sub: '1st · HDFC Bank',    amount: 84000, positive: true  },
-  { id: 'm2', emoji: '🏠', iconBg: '#FEF3E8', name: 'Rent / EMI',      sub: '5th · Auto-debit',   amount: 22000, positive: false },
-  { id: 'm3', emoji: '📈', iconBg: '#F0E8FE', name: 'SIP Investment',  sub: '10th · Groww',       amount: 10000, positive: false },
-];
-
-const TX_MAP = { Daily: DAILY_TXS, Weekly: WEEKLY_TXS, Monthly: MONTHLY_TXS };
 
 // ─── Animated Arc ─────────────────────────────────────────────────────────────
 
@@ -99,10 +140,10 @@ const Arc: React.FC<ArcProps> = ({ cx, cy, r, color, progress, sw = HERO_STR }) 
 interface HeroRingsProps { shieldPct: number; trackPct: number; buildPct: number; score: number; }
 
 const HeroRings: React.FC<HeroRingsProps> = ({ shieldPct, trackPct, buildPct, score }) => {
-  const S = HERO_S; const cx = S / 2; const cy = S / 2;
-  const rO = cx - HERO_STR / 2 - 3;
-  const rM = rO - HERO_STR - HERO_GAP;
-  const rI = rM - HERO_STR - HERO_GAP;
+  const S = HERO_S; const cx = 70; const cy = 70;
+  const rO = 56;
+  const rM = 42;
+  const rI = 28;
   const tierColor = getTierColor(score);
   const tierLabel = getTierLabel(score);
   const pulse = useRef(new Animated.Value(1)).current;
@@ -119,9 +160,9 @@ const HeroRings: React.FC<HeroRingsProps> = ({ shieldPct, trackPct, buildPct, sc
   return (
     <View style={{ width: S, height: S }}>
       <Svg width={S} height={S} viewBox={`0 0 ${S} ${S}`}>
-        <Arc cx={cx} cy={cy} r={rO} color={SHIELD_RED}  progress={shieldPct / 100} />
-        <Arc cx={cx} cy={cy} r={rM} color={BUILD_GREEN} progress={trackPct  / 100} />
-        <Arc cx={cx} cy={cy} r={rI} color={TEAL}        progress={Math.min(buildPct, 100) / 100} />
+        <Arc cx={cx} cy={cy} r={rO} color="#FF3B30" progress={shieldPct / 100} />
+        <Arc cx={cx} cy={cy} r={rM} color="#34C759" progress={trackPct  / 100} />
+        <Arc cx={cx} cy={cy} r={rI} color="#32ADE6" progress={Math.min(buildPct, 100) / 100} />
       </Svg>
       <View style={rg.centre} pointerEvents="none">
         <Animated.Text style={[rg.score, { color: tierColor, transform: [{ scale: pulse }] }]}>{score}</Animated.Text>
@@ -154,10 +195,10 @@ const MetricBadge: React.FC<{ icon: string; label: string; value: string; color:
 
 const mb = StyleSheet.create({
   row:   { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  badge: { width: 32, height: 32, borderRadius: 9, alignItems: 'center', justifyContent: 'center' },
-  icon:  { fontSize: 16 },
-  label: { fontSize: 10, fontWeight: '700', color: 'rgba(255,255,255,0.45)', letterSpacing: 0.8, textTransform: 'uppercase' },
-  value: { fontSize: 17, fontWeight: '900', letterSpacing: -0.4, fontFamily: FONT_MONO as string },
+  badge: { width: 28, height: 28, borderRadius: 999, alignItems: 'center', justifyContent: 'center' },
+  icon:  { fontSize: 14 },
+  label: { fontSize: 12, fontWeight: '600', color: '#E5E7EB', letterSpacing: 0.6, textTransform: 'uppercase' },
+  value: { fontSize: 16, fontWeight: '800', letterSpacing: -0.3, fontFamily: FONT_MONO as string },
 });
 
 // ─── Budget Arc ───────────────────────────────────────────────────────────────
@@ -197,79 +238,321 @@ type NavKey  = 'home' | 'spend' | 'invest' | 'more';
 export const HomeScreen: React.FC = () => {
   const { summary, addExpense }          = useFinancials();
   const { width: screenWidth, height: screenHeight } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+  const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
+  const HEADER_HEIGHT = SCREEN_HEIGHT * 0.40;
+  const CARD_SIZE = (SCREEN_WIDTH - 40) * 0.48;
   const scrollY = useRef(new Animated.Value(0)).current;
   /** Let expanded activity tabs receive touches only when sheet is scrolled up (opacity > 0). */
   const [sheetExpandedForInput, setSheetExpandedForInput] = useState(false);
 
-  const [activeTab,    setActiveTab]    = useState<TabKey>('Daily');
-  const [activeNav,    setActiveNav]    = useState<NavKey>('home');
-  const [sheetVisible, setSheetVisible] = useState(false);
+  const [activeTab, setActiveTab] = useState<TabKey>('Daily');
+  const [activeNav, setActiveNav] = useState<NavKey>('home');
 
-  const dailyLimit     = Math.round(summary.income > 0 ? summary.income * 0.1 / 30 : 0);
-  const dailyBudgetPct = Math.max(0, Math.min(100, Math.round(100 - (summary.shieldPct ?? 0))));
-  const dailySpend     = Math.round(dailyBudgetPct / 100 * dailyLimit);
-  const navHeight      = Math.round(screenHeight * 0.40);
+  const [isExpenseModalVisible, setIsExpenseModalVisible] = useState(false);
+  const [expenseAmount, setExpenseAmount] = useState('0');
+  const [expenseNote, setExpenseNote] = useState('');
+  const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
+  const [isRecurring, setIsRecurring] = useState(false);
+
+  const suggestedDailyLimit = Math.round(summary.income > 0 ? summary.income * 0.1 / 30 : 0);
+  const [dailySpent] = useState(200);
+  const [dailyLimit, setDailyLimit] = useState(459);
+
+  const criticalBudgetLimit = Math.max(
+    Math.round(dailyLimit * 2.67),
+    dailyLimit + 100,
+    500,
+  );
+
+  /** ~20% of screen — scales all scroll-linked transitions (replaces fixed 80–120px band). */
+  const sa = scrollAnimSpanPx(screenHeight);
+  const sk = sa / 120;
 
   useEffect(() => {
+    const thr = 72 * sk;
     const id = scrollY.addListener(({ value }) => {
-      const next = value > 72;
+      const next = value > thr;
       setSheetExpandedForInput(prev => (prev === next ? prev : next));
     });
     return () => scrollY.removeListener(id);
-  }, [scrollY]);
+  }, [scrollY, screenHeight, sk]);
 
   const squareOpacity = scrollY.interpolate({
-    inputRange: [0, 70, 120],
+    inputRange: [0, 70 * sk, sa],
     outputRange: [1, 0.45, 0],
     extrapolate: 'clamp',
   });
   const squareTranslateY = scrollY.interpolate({
-    inputRange: [0, 120],
+    inputRange: [0, sa],
     outputRange: [0, -10],
     extrapolate: 'clamp',
   });
   const expandedOpacity = scrollY.interpolate({
-    inputRange: [25, 80, 120],
+    inputRange: [25 * sk, 80 * sk, sa],
     outputRange: [0, 0.9, 1],
     extrapolate: 'clamp',
   });
   const expandedTranslateY = scrollY.interpolate({
-    inputRange: [25, 120],
+    inputRange: [25 * sk, sa],
     outputRange: [14, 0],
     extrapolate: 'clamp',
   });
   const activityHeaderOpacity = scrollY.interpolate({
-    inputRange: [0, 70, 120],
+    inputRange: [0, 70 * sk, sa],
     outputRange: [1, 0.45, 0],
     extrapolate: 'clamp',
   });
   const footerTranslateY = scrollY.interpolate({
-    inputRange: [0, 100],
+    inputRange: [0, 100 * sk],
     outputRange: [0, 150],
     extrapolate: 'clamp',
   });
 
-  const cardSize = Math.floor((screenWidth - WHITE_PAD * 2 - CARD_GAP) / 2 * 0.85);
+  /** White wash under scroll layer — fixed height, opacity only (avoids layout thrash while scrolling). */
+  const expandTopWashOpacity = scrollY.interpolate({
+    inputRange: [20 * sk, 85 * sk],
+    outputRange: [0, 1],
+    extrapolate: 'clamp',
+  });
+
+  const cardSize = Math.round(CARD_SIZE);
   const arcSize  = Math.round(cardSize * 0.38);
 
+  /** Expanded: pull ledger up under absolute filters (layout phantom from faded grid). Not animated. */
+  const txListOverlapExpanded = Math.round(cardSize + SHEET_SECTION_GAP * 2 + 28);
+
   const METRICS = [
-    { icon: '🛡️', label: 'Shield', value: `₹${dailyLimit.toLocaleString('en-IN')}`,           color: SHIELD_RED  },
+    { icon: '🛡️', label: 'Shield', value: `₹${suggestedDailyLimit.toLocaleString('en-IN')}`,  color: SHIELD_RED  },
     { icon: '🎯', label: 'Track',  value: fmt(Math.max(0, summary.income - summary.expenses)), color: BUILD_GREEN },
     { icon: '📈', label: 'Build',  value: fmt(Math.max(0, summary.savings ?? 0)),               color: '#3182CE'   },
   ];
 
-  const transactions = TX_MAP[activeTab];
+  const windowHeight = Dimensions.get('window').height;
+  /** Align scroll spacer with fixed navy (30%) so white sheet occupies ~70% below the fold on load. */
+  const scrollTransparentSpacerHeight = HEADER_HEIGHT;
+  const transactions = DUMMY_TRANSACTIONS;
+
+  useEffect(() => {
+    if (!isExpenseModalVisible) return;
+    setExpenseAmount('0');
+    setExpenseNote('');
+    setSelectedCategory(null);
+    setIsRecurring(false);
+  }, [isExpenseModalVisible]);
+
+  const handleKeypadPress = useCallback((val: string) => {
+    if (val === '<') {
+      setExpenseAmount(prev => (prev.length <= 1 ? '0' : prev.slice(0, -1)));
+      return;
+    }
+    if (val === '.') {
+      setExpenseAmount(prev => {
+        if (prev.includes('.')) return prev;
+        return prev === '' || prev === '0' ? '0.' : `${prev}.`;
+      });
+      return;
+    }
+    if (!/^\d$/.test(val)) return;
+    setExpenseAmount(prev => {
+      const [whole, frac] = prev.split('.');
+      if (frac !== undefined && frac.length >= 2) return prev;
+      if (prev === '0') return val;
+      if (prev === '0.') return `0.${val}`;
+      if (frac !== undefined) return `${whole}.${frac}${val}`;
+      return `${prev}${val}`;
+    });
+  }, []);
+
+  const closeExpenseModal = useCallback(() => {
+    setIsExpenseModalVisible(false);
+  }, []);
+
+  const closeExpenseModalRef = useRef(closeExpenseModal);
+  closeExpenseModalRef.current = closeExpenseModal;
+
+  const expenseSheetPan = useMemo(
+    () =>
+      PanResponder.create({
+        onMoveShouldSetPanResponder: (_, g) =>
+          Platform.OS === 'android' && g.dy > 12 && Math.abs(g.dy) > Math.abs(g.dx) * 1.2,
+        onPanResponderRelease: (_, g) => {
+          if (Platform.OS === 'android' && g.dy > 96) closeExpenseModalRef.current();
+        },
+      }),
+    [],
+  );
+
+  const logExpenseDisabled =
+    expenseAmount === '0' ||
+    expenseAmount === '' ||
+    selectedCategory === null ||
+    selectedCategory === 'more' ||
+    Number.isNaN(parseFloat(expenseAmount)) ||
+    parseFloat(expenseAmount) <= 0;
+
+  const submitExpense = useCallback(async () => {
+    const amt = parseFloat(expenseAmount);
+    if (
+      expenseAmount === '0' ||
+      expenseAmount === '' ||
+      selectedCategory === null ||
+      selectedCategory === 'more' ||
+      Number.isNaN(amt) ||
+      amt <= 0
+    ) {
+      return;
+    }
+    const expenseCategory = MODAL_TAG_TO_EXPENSE[selectedCategory];
+    if (!expenseCategory) return;
+    await addExpense(
+      expenseCategory,
+      amt,
+      expenseNote.trim() || undefined,
+      isRecurring ? true : undefined,
+    );
+    setIsExpenseModalVisible(false);
+  }, [addExpense, expenseAmount, expenseNote, isRecurring, selectedCategory]);
+
+  const sheetBottomPad = Platform.OS === 'ios' ? 34 : 20;
+  const catCols = 4;
+  const catGap = 10;
+  const catPillW =
+    (screenWidth - WHITE_PAD * 2 - catGap * (catCols - 1)) / catCols;
+
+  const expenseModalContent = (
+    <>
+      <View style={s.expModalHeaderRow}>
+        <Text style={s.expModalBrand}>W E A L T H  O S</Text>
+        <View style={s.expModalHeaderRight}>
+          <Text style={s.expModalScreenTitle}>Log Expense</Text>
+          <TouchableOpacity
+            style={s.expModalCloseBtn}
+            onPress={() => setIsExpenseModalVisible(false)}
+            activeOpacity={0.85}
+            accessibilityLabel="Close"
+          >
+            <Text style={s.expModalCloseIcon}>✕</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      <Text
+        style={[s.expModalAmountDisplay, expenseAmount === '0' && s.expModalAmountDisplayMuted]}
+        numberOfLines={1}
+        adjustsFontSizeToFit
+      >
+        ₹{expenseAmount}
+      </Text>
+      <View style={s.expModalAmountPill}>
+        <Text style={s.expModalAmountPillTxt}>INPUT AMOUNT</Text>
+      </View>
+
+      <TextInput
+        style={s.expModalNoteLight}
+        placeholder="What was this for?"
+        placeholderTextColor={EXP_MODAL_PLACEHOLDER}
+        value={expenseNote}
+        onChangeText={setExpenseNote}
+        returnKeyType="done"
+      />
+
+      <View style={s.expModalCatGrid}>
+        {EXPENSE_MODAL_CATEGORIES.map(cat => {
+          const active = selectedCategory === cat.id;
+          return (
+            <TouchableOpacity
+              key={cat.id}
+              activeOpacity={0.85}
+              style={[s.expModalCatTag, { width: catPillW }, active && s.expModalCatTagActive]}
+              onPress={() => setSelectedCategory(cat.id)}
+            >
+              <Text style={s.expModalCatTagIcon}>{cat.icon}</Text>
+              <Text style={s.expModalCatTagLabel}>{cat.label}</Text>
+            </TouchableOpacity>
+          );
+        })}
+      </View>
+
+      <View style={s.expModalRecurringCard}>
+        <View style={s.expModalRecurringCopy}>
+          <Text style={s.expModalRecurringTitle}>Mark as Fixed / Recurring</Text>
+          <Text style={s.expModalRecurringSub}>
+            Fixed bills do not affect your daily Shield Ring
+          </Text>
+        </View>
+        <Switch
+          value={isRecurring}
+          onValueChange={setIsRecurring}
+          trackColor={{ false: '#D1D5DB', true: EXP_MODAL_VIOLET }}
+          thumbColor="#FFFFFF"
+          ios_backgroundColor="#D1D5DB"
+        />
+      </View>
+
+      <TouchableOpacity
+        style={[
+          s.expModalLogBtn,
+          logExpenseDisabled ? s.expModalLogBtnDisabled : s.expModalLogBtnActive,
+        ]}
+        onPress={submitExpense}
+        activeOpacity={0.88}
+        disabled={logExpenseDisabled}
+      >
+        <Text style={[s.expModalLogBtnTxt, logExpenseDisabled && s.expModalLogBtnTxtDisabled]}>
+          LOG EXPENSE
+        </Text>
+      </TouchableOpacity>
+
+      <View style={[s.expModalKeypadLight, { paddingBottom: sheetBottomPad }]}>
+        {KEYPAD_ROWS.map((row, ri) => (
+          <View key={ri} style={s.expModalKeypadRow}>
+            {row.map(key => (
+              <TouchableOpacity
+                key={key}
+                style={s.expModalKeyBare}
+                onPress={() => handleKeypadPress(key)}
+                activeOpacity={0.35}
+              >
+                <Text style={s.expModalKeyBareTxt}>{key === '<' ? '⌫' : key}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        ))}
+      </View>
+    </>
+  );
 
   return (
     <SafeAreaView style={s.mainContainer}>
       <StatusBar barStyle="light-content" backgroundColor={D.bg} />
 
-      {/* ── NAVY HEADER — fixed 40% height ───────────────────────────────── */}
-      <View style={[s.navyHeaderFixed, { height: navHeight }]}>
-        <Animated.View pointerEvents="none" style={[s.navyBlurOverlay, { opacity: scrollY.interpolate({ inputRange: [0, 200], outputRange: [0, 1], extrapolate: 'clamp' }) }]} />
+      {/* ── NAVY HEADER — fixed 40% height ─────────────────────────────────── */}
+      <View
+        style={{
+          ...s.navyHeaderFixed,
+          height: Dimensions.get('window').height * 0.40,
+          paddingTop: insets.top + 16,
+          paddingHorizontal: 24,
+          backgroundColor: '#0A0E17',
+        }}
+      >
+        <Animated.View
+          pointerEvents="none"
+          style={[
+            s.navyBlurOverlay,
+            {
+              opacity: scrollY.interpolate({
+                inputRange: [0, Math.round(200 * sk)],
+                outputRange: [0, 1],
+                extrapolate: 'clamp',
+              }),
+            },
+          ]}
+        />
 
-        {/* Header row */}
-        <View style={s.header}>
+        {/* 1. TOP GREETING (Anchored to top padding) */}
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
           <View>
             <Text style={s.greeting}>Hi, Welcome Back</Text>
             <Text style={s.greetingSub}>Good Morning</Text>
@@ -280,87 +563,149 @@ export const HomeScreen: React.FC = () => {
           </View>
         </View>
 
-        {/* Rings + Metrics */}
-        <View style={s.heroRow}>
-          <HeroRings shieldPct={summary.shieldPct} trackPct={summary.trackPct}
-            buildPct={summary.buildPct} score={summary.wealthScore} />
-          <View style={s.metricStack}>
-            {METRICS.map(m => (
-              <MetricBadge key={m.label} icon={m.icon} label={m.label} value={m.value} color={m.color} />
-            ))}
+        {/* 2. BOTTOM GROUP (Rings + Insight anchored to the bottom) */}
+        <View
+          style={{
+            flex: 1,
+            justifyContent: 'flex-end',
+            paddingBottom: 32,
+          }}
+        >
+          <View
+            style={{
+              flexDirection: 'row',
+              justifyContent: 'center',
+              alignItems: 'center',
+              width: '100%',
+            }}
+          >
+            <HeroRings
+              shieldPct={summary.shieldPct}
+              trackPct={summary.trackPct}
+              buildPct={summary.buildPct}
+              score={summary.wealthScore}
+            />
+            <View style={s.metricStack}>
+              {METRICS.map(m => (
+                <MetricBadge key={m.label} icon={m.icon} label={m.label} value={m.value} color={m.color} />
+              ))}
+            </View>
+          </View>
+
+          <View style={{ alignSelf: 'center', marginTop: 24 }}>
+            <TouchableOpacity style={s.insightPill} activeOpacity={0.75}>
+              <Text style={s.insightSpark}>✦</Text>
+              <Text style={s.insightText} numberOfLines={1}>
+                ₹1,200 more this week for MacBook
+              </Text>
+              <Text style={s.insightArrow}>›</Text>
+            </TouchableOpacity>
           </View>
         </View>
-
-        {/* Insight pill — pinned to bottom of navy section */}
-        <TouchableOpacity style={s.insightPill} activeOpacity={0.75}>
-          <Text style={s.insightSpark}>✦</Text>
-          <Text style={s.insightText} numberOfLines={1}>₹1,200 more this week for MacBook</Text>
-          <Text style={s.insightArrow}>›</Text>
-        </TouchableOpacity>
-
       </View>
 
-      <Animated.ScrollView
-        style={s.whiteCardScrollLayer}
-        contentContainerStyle={{
-          paddingTop: navHeight - CURVE,
-          paddingBottom: 0,
-          flexGrow: 1,
+      <Animated.View
+        pointerEvents="none"
+        style={{
+          position: 'absolute',
+          left: 0,
+          right: 0,
+          top: 0,
+          zIndex: 5,
+          height: HEADER_HEIGHT + CURVE + 24,
+          backgroundColor: '#FFFFFF',
+          opacity: expandTopWashOpacity,
         }}
-        stickyHeaderIndices={[0]}
+      />
+
+      <Animated.ScrollView
+        bounces={false}
+        overScrollMode="never"
+        showsVerticalScrollIndicator={false}
+        stickyHeaderIndices={[1]}
+        style={{ flex: 1, zIndex: 10 }}
+        contentContainerStyle={s.scrollContentTransparent}
         scrollEventThrottle={16}
         onScroll={Animated.event(
           [{ nativeEvent: { contentOffset: { y: scrollY } } }],
           { useNativeDriver: false },
         )}
-        showsVerticalScrollIndicator={false}
-        bounces={false}
         alwaysBounceVertical={false}
-        overScrollMode="never"
       >
-        <View style={s.stickySheetHeader}>
+        {/* INDEX 0: invisible spacer — exact 40% navy header height */}
+        <View style={[s.scrollTopSpacer, { height: scrollTransparentSpacerHeight }]} />
+
+        {/* INDEX 1: sticky white sheet (grabber, pills, title, filters) */}
+        <View
+          style={[
+            s.stickySheetHeader,
+            {
+              backgroundColor: '#FFFFFF',
+              borderTopLeftRadius: 36,
+              borderTopRightRadius: 36,
+              paddingBottom: 0,
+            },
+          ]}
+        >
             <View style={s.sheetHandle} />
 
-            <Animated.View style={[s.actionGrid, { marginTop: 20, opacity: squareOpacity, transform: [{ translateY: squareTranslateY }] }]}>
-              <View style={[s.budgetCard, { width: cardSize, height: cardSize }]}>
-                <View style={s.budgetTop}>
-                  <View style={s.heartBadge}><Text style={s.heartIcon}>💗</Text></View>
-                  <BudgetArc size={arcSize} />
-                </View>
-                <View style={s.budgetBottom}>
-                  <Text style={s.cardLabel}>DAILY BUDGET</Text>
-                  <View style={s.ratioRow}>
-                    <Text style={s.ratioSpend}>₹{dailySpend.toLocaleString('en-IN')}</Text>
-                    <Text style={s.ratioLimit}> / {dailyLimit.toLocaleString('en-IN')}</Text>
+            <Animated.View style={[{ opacity: squareOpacity, transform: [{ translateY: squareTranslateY }] }]}>
+              <View style={{ height: CARD_SIZE, width: '100%', position: 'relative', marginTop: 20 }}>
+                {/* Yellow Vault Sweep Card (Static Background) */}
+                <View style={{ position: 'absolute', right: 0, width: CARD_SIZE, height: CARD_SIZE, borderRadius: 24, overflow: 'hidden' }}>
+                  <View style={s.vaultCard}>
+                    <View style={s.vaultTopRow}>
+                      <View style={s.vaultIndicator}><Text style={{ fontSize: 13 }}>💛</Text></View>
+                      <TouchableOpacity style={s.sweepPill} activeOpacity={0.85}>
+                        <Text style={s.sweepPillIcon}>◎</Text>
+                        <Text style={s.sweepPillTxt}>SWEEP{'\n'}TO VAULT</Text>
+                      </TouchableOpacity>
+                    </View>
+                    <View style={s.vaultBottom}>
+                      <Text style={s.vaultLabel}>VAULT SWEEP</Text>
+                      <Text
+                        style={s.vaultAmount}
+                        numberOfLines={1}
+                        adjustsFontSizeToFit
+                        minimumFontScale={0.6}
+                      >
+                        ₹300
+                      </Text>
+                      <Text style={s.vaultSub}>UNSPENT</Text>
+                    </View>
                   </View>
                 </View>
-              </View>
 
-              <View style={[s.vaultCard, { width: cardSize, height: cardSize }]}>
-                <View style={s.vaultTopRow}>
-                  <View style={s.vaultIndicator}><Text style={{ fontSize: 13 }}>💛</Text></View>
-                  <TouchableOpacity style={s.sweepPill} activeOpacity={0.85}>
-                    <Text style={s.sweepPillIcon}>◎</Text>
-                    <Text style={s.sweepPillTxt}>SWEEP{'\n'}TO VAULT</Text>
-                  </TouchableOpacity>
-                </View>
-                <View style={s.vaultBottom}>
-                  <Text style={s.vaultLabel}>VAULT SWEEP</Text>
-                  <Text style={s.vaultAmount}>₹300</Text>
-                  <Text style={s.vaultSub}>UNSPENT</Text>
-                </View>
+                {/* Flipping Daily Budget Card (Animated Overlay) */}
+                <DailyBudgetCard
+                  cardSize={CARD_SIZE}
+                  dailySpent={dailySpent}
+                  dailyLimit={dailyLimit}
+                  setDailyLimit={setDailyLimit}
+                  criticalLimit={criticalBudgetLimit}
+                  arcSlot={<BudgetArc size={arcSize} />}
+                />
               </View>
             </Animated.View>
 
-            <Animated.View pointerEvents="none" style={[s.expandedPillStrip, { marginTop: 20, opacity: expandedOpacity, transform: [{ translateY: expandedTranslateY }] }]}>
+            <Animated.View pointerEvents="none" style={[s.expandedPillStrip, { opacity: expandedOpacity, transform: [{ translateY: expandedTranslateY }] }]}>
               <View style={[s.expandedPillCard, s.expandedPillCardDark]}>
                 <View style={s.expandedPillIconWrap}><Text style={s.expandedPillIcon}>💗</Text></View>
                 <View style={s.expandedPillCopy}>
                   <Text style={s.expandedPillLabel}>DAILY BUDGET</Text>
-                  <Text style={s.expandedPillAmount}>
-                    <Text style={s.expandedPillAmountStrong}>220</Text>
-                    <Text style={s.expandedPillAmountSoft}>/500</Text>
-                  </Text>
+                  <View style={s.expandedPillAmount}>
+                    <Text
+                      style={s.expandedPillAmountStrong}
+                      numberOfLines={1}
+                      adjustsFontSizeToFit
+                      minimumFontScale={0.6}
+                    >
+                      {dailySpent.toLocaleString('en-IN')}
+                    </Text>
+                    <Text style={s.expandedPillAmountSoft}>
+                      /{dailyLimit.toLocaleString('en-IN')}
+                    </Text>
+                  </View>
                 </View>
               </View>
 
@@ -368,9 +713,16 @@ export const HomeScreen: React.FC = () => {
                 <View style={s.expandedPillIconWrapYellow}><Text style={s.expandedPillIconDark}>💛</Text></View>
                 <View style={s.expandedPillCopy}>
                   <Text style={s.expandedPillLabel}>VAULT SWEEP</Text>
-                  <Text style={s.expandedPillAmount}>
-                    <Text style={s.expandedPillAmountStrong}>₹300</Text>
-                  </Text>
+                  <View style={s.expandedPillAmount}>
+                    <Text
+                      style={s.expandedPillAmountStrong}
+                      numberOfLines={1}
+                      adjustsFontSizeToFit
+                      minimumFontScale={0.6}
+                    >
+                      ₹300
+                    </Text>
+                  </View>
                 </View>
               </View>
             </Animated.View>
@@ -394,25 +746,34 @@ export const HomeScreen: React.FC = () => {
               </View>
             </Animated.View>
 
-            <Animated.View style={{ opacity: activityHeaderOpacity }}>
-              <View style={s.activityHeader}>
-                <Text style={s.activityTitle}>Recent Activity</Text>
-                <View style={s.tabStrip}>
-                  {(['Daily', 'Weekly', 'Monthly'] as TabKey[]).map(tab => (
-                    <TouchableOpacity
-                      key={tab}
-                      style={[s.tab, activeTab === tab && s.tabActive]}
-                      onPress={() => setActiveTab(tab)}
-                    >
-                      <Text style={[s.tabTxt, activeTab === tab && s.tabTxtActive]}>{tab}</Text>
-                    </TouchableOpacity>
-                  ))}
+            {!sheetExpandedForInput && (
+              <Animated.View style={{ opacity: activityHeaderOpacity, marginTop: 0 }}>
+                <View style={s.activityHeader}>
+                  <Text style={s.activityTitle}>Recent Activity</Text>
+                  <View style={s.tabStrip}>
+                    {(['Daily', 'Weekly', 'Monthly'] as TabKey[]).map(tab => (
+                      <TouchableOpacity
+                        key={tab}
+                        style={[s.tab, activeTab === tab && s.tabActive]}
+                        onPress={() => setActiveTab(tab)}
+                      >
+                        <Text style={[s.tabTxt, activeTab === tab && s.tabTxtActive]}>{tab}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
                 </View>
-              </View>
-            </Animated.View>
+              </Animated.View>
+            )}
         </View>
 
-        <Animated.View style={s.txList}>
+        {/* INDEX 2: ledger — infinite white below sticky header */}
+        <Animated.View
+          style={[
+            s.txListShell,
+            { minHeight: windowHeight },
+            sheetExpandedForInput && { marginTop: -txListOverlapExpanded },
+          ]}
+        >
           {transactions.map((tx, i) => (
             <View key={tx.id} style={[s.txRow, i < transactions.length - 1 && s.txDivider]}>
               <View style={[s.txIcon, { backgroundColor: tx.iconBg }]}>
@@ -427,12 +788,7 @@ export const HomeScreen: React.FC = () => {
               </Text>
             </View>
           ))}
-
-          <View style={{ height: 90 }} />
         </Animated.View>
-
-        {/* Solid white tail for tab bar clearance — avoids painting paddingTop (navy peek) white */}
-        <View style={{ height: 220, backgroundColor: '#FFFFFF' }} />
       </Animated.ScrollView>
 
       {/* ── TAB BAR ───────────────────────────────────────────────────────── */}
@@ -445,14 +801,39 @@ export const HomeScreen: React.FC = () => {
         <NavItem icon="⋯"  label="More"   active={activeNav === 'more'}   onPress={() => setActiveNav('more')}   />
 
         <View style={s.fabAbsWrap} pointerEvents="box-none">
-          <TouchableOpacity style={s.fab} onPress={() => setSheetVisible(true)} activeOpacity={0.85}>
+          <TouchableOpacity style={s.fab} onPress={() => setIsExpenseModalVisible(true)} activeOpacity={0.85}>
             <Text style={s.fabIcon}>+</Text>
           </TouchableOpacity>
         </View>
       </View>
       </Animated.View>
 
-      <ExpenseInputSheet visible={sheetVisible} onClose={() => setSheetVisible(false)} onSubmit={addExpense} />
+      <Modal
+        visible={isExpenseModalVisible}
+        animationType="slide"
+        presentationStyle={Platform.OS === 'ios' ? 'pageSheet' : 'fullScreen'}
+        transparent={Platform.OS === 'android'}
+        onRequestClose={() => setIsExpenseModalVisible(false)}
+        onDismiss={() => setIsExpenseModalVisible(false)}
+        allowSwipeDismissal={Platform.OS === 'ios'}
+        statusBarTranslucent={Platform.OS === 'android'}
+      >
+        {Platform.OS === 'ios' ? (
+          <View style={s.expModalSheetIOS}>
+            {expenseModalContent}
+          </View>
+        ) : (
+          <View style={s.expModalRoot}>
+            <Pressable
+              style={s.expModalBackdrop}
+              onPress={() => setIsExpenseModalVisible(false)}
+            />
+            <View style={s.expModalSheetAndroid} {...expenseSheetPan.panHandlers}>
+              {expenseModalContent}
+            </View>
+          </View>
+        )}
+      </Modal>
     </SafeAreaView>
   );
 };
@@ -472,9 +853,7 @@ const s = StyleSheet.create({
     zIndex: -1,
     elevation: 0,
     backgroundColor: D.bg,
-    paddingTop: 50,
-    paddingBottom: 0,
-    justifyContent: 'space-between',
+    justifyContent: 'flex-start',
   },
 
   header: {
@@ -494,40 +873,49 @@ const s = StyleSheet.create({
     backgroundColor: BUILD_GREEN, borderWidth: 1.5, borderColor: D.bg,
   },
 
+  headerMidGroup: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
   // Rings + metrics — centred
   heroRow: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-    gap: 46, paddingHorizontal: 16,
+    gap: 42, paddingHorizontal: 16,
   },
   metricStack: { height: HERO_S, justifyContent: 'space-between' },
 
   // Insight pill — pinned at base of navy section
   insightPill: {
     flexDirection: 'row', alignItems: 'center', gap: 9,
-    marginHorizontal: 20, marginBottom: CURVE + 20,
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    borderRadius: RADIUS_PILL,
-    paddingHorizontal: 16, paddingVertical: 10,
-    borderWidth: 1, borderColor: 'rgba(255,255,255,0.12)',
+    alignSelf: 'center',
+    width: 'auto',
+    maxWidth: '92%',
+    marginHorizontal: 0,
+    marginTop: 0,
+    marginBottom: 0,
+    backgroundColor: '#161622',
+    borderRadius: 12,
+    paddingHorizontal: 20, paddingVertical: 12,
+    borderWidth: 1, borderColor: '#2A2A3C',
   },
   insightSpark: { fontSize: 14, color: VAULT_GOLD },
   insightText:  { flex: 1, fontSize: 13, color: 'rgba(255,255,255,0.9)', fontWeight: '600' },
   insightArrow: { fontSize: 20, color: D.muted, fontWeight: '300' },
 
-  // ── White scroll — overlaps navy by CURVE px ──────────────────────────────
-  whiteCardScrollLayer: {
-    flex: 1,
+  // ── Scroll: transparent spacer + sticky sheet + ledger shell ──────────────
+  scrollContentTransparent: {
+    flexGrow: 1,
     backgroundColor: 'transparent',
-    zIndex: 10,
-    elevation: 10,
+  },
+  scrollTopSpacer: {
+    backgroundColor: 'transparent',
   },
   stickySheetHeader: {
-    backgroundColor: '#FFFFFF',
     paddingHorizontal: WHITE_PAD,
-    paddingTop: 20,
+    paddingTop: 12,
+    marginBottom: 0,
     paddingBottom: 0,
-    borderTopLeftRadius: 36,
-    borderTopRightRadius: 36,
     overflow: 'hidden',
   },
   whiteCardContent: {
@@ -542,14 +930,31 @@ const s = StyleSheet.create({
   sheetHandle: {
     alignSelf: 'center',
     width: 34,
-    height: 4,
+    height: SHEET_HANDLE_H,
     borderRadius: 999,
     backgroundColor: '#D9DAE7',
-    marginBottom: 12,
+    marginBottom: 0,
   },
 
   // ── Action pills ──────────────────────────────────────────────────────────
-  actionGrid: { flexDirection: 'row', gap: CARD_GAP, marginBottom: 20, justifyContent: 'center' },
+  actionGrid: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    position: 'relative',
+    width: '100%',
+    aspectRatio: 100 / 48,
+    marginTop: 16,
+    marginBottom: 20,
+    overflow: 'visible',
+  },
+  vaultCardSlot: {
+    position: 'absolute',
+    right: 0,
+    top: 0,
+    width: '48%',
+    aspectRatio: 1,
+    zIndex: 1,
+  },
   budgetCard: {
     backgroundColor: D.card,
     borderRadius: RADIUS_LG,
@@ -565,13 +970,28 @@ const s = StyleSheet.create({
   budgetTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' },
   heartBadge: { width: 32, height: 32, borderRadius: 10, backgroundColor: 'rgba(255,255,255,0.08)', alignItems: 'center', justifyContent: 'center' },
   heartIcon: { fontSize: 16 },
-  budgetBottom: { gap: 2 },
+  budgetBottom: { gap: 2, width: '100%', minWidth: 0 },
   cardLabel: { fontSize: 9, fontWeight: '800', color: D.muted, letterSpacing: 1 },
-  ratioRow: { flexDirection: 'row', alignItems: 'baseline' },
-  ratioSpend: { fontSize: 28, fontWeight: '900', color: '#FFFFFF', letterSpacing: -1, fontFamily: FONT_MONO as string },
+  ratioRow: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    width: '100%',
+    minWidth: 0,
+  },
+  ratioSpend: {
+    flex: 1,
+    minWidth: 0,
+    fontSize: 24,
+    fontWeight: '900',
+    color: '#FFFFFF',
+    letterSpacing: -1,
+    fontFamily: FONT_MONO as string,
+  },
   ratioLimit: { fontSize: 14, fontWeight: '600', color: 'rgba(255,255,255,0.38)', fontFamily: FONT_MONO as string },
 
   vaultCard: {
+    width: '100%',
+    aspectRatio: 1,
     backgroundColor: CYBER_YELLOW,
     borderRadius: RADIUS_LG,
     padding: 14,
@@ -587,9 +1007,16 @@ const s = StyleSheet.create({
   sweepPill: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: CYBER_YELLOW, borderRadius: 50, borderWidth: 1.5, borderColor: 'rgba(0,0,0,0.20)', paddingHorizontal: 8, paddingVertical: 5 },
   sweepPillIcon: { fontSize: 11, color: '#1A1005' },
   sweepPillTxt: { fontSize: 7, fontWeight: '900', color: '#1A1005', letterSpacing: 0.4, lineHeight: 9 },
-  vaultBottom: { gap: 1 },
+  vaultBottom: { gap: 1, width: '100%', minWidth: 0 },
   vaultLabel: { fontSize: 9, fontWeight: '800', color: 'rgba(0,0,0,0.5)', letterSpacing: 1 },
-  vaultAmount: { fontSize: 26, fontWeight: '900', color: '#1A1005', letterSpacing: -1, fontFamily: FONT_MONO as string },
+  vaultAmount: {
+    alignSelf: 'stretch',
+    fontSize: 24,
+    fontWeight: '900',
+    color: '#1A1005',
+    letterSpacing: -1,
+    fontFamily: FONT_MONO as string,
+  },
   vaultSub: { fontSize: 9, fontWeight: '700', color: 'rgba(0,0,0,0.45)', letterSpacing: 0.5 },
 
   budgetPill: {
@@ -650,7 +1077,7 @@ const s = StyleSheet.create({
   vaultPillSub: { fontSize: 9, fontWeight: '700', color: 'rgba(0,0,0,0.45)', letterSpacing: 0.5 },
   expandedPillStrip: {
     position: 'absolute',
-    top: 18,
+    top: EXPANDED_PILLS_TOP,
     left: WHITE_PAD,
     right: WHITE_PAD,
     flexDirection: 'row',
@@ -660,7 +1087,7 @@ const s = StyleSheet.create({
   },
   expandedPillCard: {
     flex: 1,
-    minHeight: 58,
+    minHeight: EXPANDED_PILL_ROW_MIN,
     borderRadius: 999,
     paddingHorizontal: 16,
     paddingVertical: 11,
@@ -704,9 +1131,13 @@ const s = StyleSheet.create({
   expandedPillAmount: {
     flexDirection: 'row',
     alignItems: 'baseline',
+    width: '100%',
+    minWidth: 0,
   },
   expandedPillAmountStrong: {
-    fontSize: 19,
+    flex: 1,
+    minWidth: 0,
+    fontSize: 17,
     fontWeight: '900',
     color: '#FFFFFF',
     letterSpacing: -0.5,
@@ -721,12 +1152,14 @@ const s = StyleSheet.create({
   },
   expandedActivityOverlay: {
     position: 'absolute',
-    top: 110,
+    top: EXPANDED_ACTIVITY_TOP,
     left: WHITE_PAD,
     right: WHITE_PAD,
-    alignItems: 'center',
+    alignItems: 'stretch',
     zIndex: 18,
     elevation: 18,
+    marginBottom: 0,
+    paddingBottom: 0,
   },
   expandedActivityTitle: {
     fontSize: 18,
@@ -734,20 +1167,27 @@ const s = StyleSheet.create({
     color: TEXT_PRIMARY,
     letterSpacing: -0.3,
     textAlign: 'center',
-    marginBottom: 16,
+    marginBottom: 8,
   },
   expandedTabStrip: {
     flexDirection: 'row',
     backgroundColor: '#EDEDF5',
-    borderRadius: RADIUS_PILL,
-    padding: 4,
-    justifyContent: 'center',
-    alignSelf: 'center',
+    borderRadius: 24,
+    minHeight: 40,
+    paddingVertical: 6,
+    paddingHorizontal: 4,
+    marginBottom: 0,
+    alignSelf: 'stretch',
+    width: '100%',
+    alignItems: 'center',
   },
   expandedTab: {
+    flex: 1,
+    minWidth: 0,
     alignItems: 'center',
-    paddingVertical: 7,
-    paddingHorizontal: 15,
+    justifyContent: 'center',
+    paddingVertical: 8,
+    paddingHorizontal: 16,
     borderRadius: RADIUS_PILL,
   },
   expandedTabActive: {
@@ -755,24 +1195,61 @@ const s = StyleSheet.create({
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.1,
-    shadowRadius: 3,
+    shadowRadius: 4,
     elevation: 2,
   },
-  expandedTabTxt: { fontSize: 13, fontWeight: '600', color: TEXT_MUTED },
-  expandedTabTxtActive: { color: TEXT_PRIMARY, fontWeight: '800' },
+  expandedTabTxt: { fontSize: 13, fontWeight: '500', color: TEXT_MUTED },
+  expandedTabTxtActive: { color: TEXT_PRIMARY, fontWeight: '600' },
 
   // ── Recent Activity ───────────────────────────────────────────────────────
   activityHeader: {
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-    marginBottom: 4,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginTop: 0,
+    marginBottom: 0,
+    paddingBottom: 0,
   },
-  activityTitle: { fontSize: 17, fontWeight: '800', color: TEXT_PRIMARY, letterSpacing: -0.3 },
+  activityTitle: {
+    fontSize: 17,
+    fontWeight: '800',
+    color: TEXT_PRIMARY,
+    letterSpacing: -0.3,
+    flexShrink: 0,
+    marginRight: SHEET_SECTION_GAP,
+  },
 
-  tabStrip: { flexDirection: 'row', backgroundColor: '#EDEDF5', borderRadius: RADIUS_PILL, padding: 2 },
-  tab:          { alignItems: 'center', paddingVertical: 5, paddingHorizontal: 10, borderRadius: RADIUS_PILL },
-  tabActive:    { backgroundColor: '#FFFFFF', shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.1, shadowRadius: 3, elevation: 2 },
-  tabTxt:       { fontSize: 11, fontWeight: '600', color: TEXT_MUTED },
-  tabTxtActive: { color: TEXT_PRIMARY, fontWeight: '800' },
+  tabStrip: {
+    flexDirection: 'row',
+    backgroundColor: '#EDEDF5',
+    borderRadius: 24,
+    minHeight: 40,
+    paddingVertical: 6,
+    paddingHorizontal: 4,
+    marginBottom: 0,
+    flex: 1,
+    minWidth: 0,
+    marginLeft: SHEET_SECTION_GAP,
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  tab: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: RADIUS_PILL,
+  },
+  tabActive: {
+    backgroundColor: '#FFFFFF',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  tabTxt:       { fontSize: 12, fontWeight: '500', color: TEXT_MUTED },
+  tabTxtActive: { color: TEXT_PRIMARY, fontWeight: '600' },
 
   txRow:     { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 11 },
   txDivider: { borderBottomWidth: 1, borderBottomColor: '#F2F2F7' },
@@ -782,10 +1259,12 @@ const s = StyleSheet.create({
   txName:    { fontSize: 14, fontWeight: '700', color: TEXT_PRIMARY },
   txSub:     { fontSize: 11, color: TEXT_MUTED, fontWeight: '500' },
   txAmt:     { fontSize: 14, fontWeight: '800', letterSpacing: -0.3, fontFamily: FONT_MONO as string },
-  txList: {
+  txListShell: {
     backgroundColor: '#FFFFFF',
     paddingHorizontal: WHITE_PAD,
     paddingTop: 0,
+    marginTop: 0,
+    paddingBottom: 200,
   },
 
   // ── Tab bar ───────────────────────────────────────────────────────────────
@@ -865,6 +1344,214 @@ const s = StyleSheet.create({
     fontWeight: '800',
     color: TEXT_PRIMARY,
     letterSpacing: -0.2,
+    fontFamily: FONT_MONO as string,
+  },
+
+  // ── Log expense modal — light theme (Apple-style) ─────────────────────────
+  expModalRoot: {
+    flex: 1,
+    justifyContent: 'flex-end',
+  },
+  expModalBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+  },
+  expModalSheetIOS: {
+    flex: 1,
+    backgroundColor: '#FFFFFF',
+    paddingTop: 16,
+    paddingHorizontal: WHITE_PAD,
+  },
+  expModalSheetAndroid: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    width: '100%',
+    backgroundColor: '#FFFFFF',
+    borderTopLeftRadius: 36,
+    borderTopRightRadius: 36,
+    paddingTop: 16,
+    paddingHorizontal: WHITE_PAD,
+    maxHeight: '94%',
+  },
+  expModalHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 20,
+  },
+  expModalBrand: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: EXP_MODAL_NAVY,
+    letterSpacing: 3.2,
+  },
+  expModalHeaderRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  expModalScreenTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: EXP_MODAL_NAVY,
+    letterSpacing: -0.3,
+  },
+  expModalCloseBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: EXP_MODAL_GRAY_BG,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  expModalCloseIcon: {
+    color: EXP_MODAL_NAVY,
+    fontSize: 18,
+    fontWeight: '600',
+    marginTop: -1,
+  },
+  expModalAmountDisplay: {
+    fontSize: 58,
+    fontWeight: '900',
+    color: EXP_MODAL_VIOLET,
+    letterSpacing: -2,
+    fontFamily: FONT_MONO as string,
+    textAlign: 'center',
+  },
+  expModalAmountDisplayMuted: {
+    color: '#C4B5FD',
+  },
+  expModalAmountPill: {
+    alignSelf: 'center',
+    backgroundColor: EXP_MODAL_GRAY_BG,
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+    borderRadius: 999,
+    marginTop: 8,
+    marginBottom: 20,
+  },
+  expModalAmountPillTxt: {
+    fontSize: 9,
+    fontWeight: '800',
+    color: EXP_MODAL_NAVY,
+    letterSpacing: 1.4,
+  },
+  expModalNoteLight: {
+    backgroundColor: EXP_MODAL_GRAY_BG,
+    borderRadius: 16,
+    minHeight: 60,
+    padding: 16,
+    fontSize: 16,
+    fontWeight: '500',
+    color: EXP_MODAL_NAVY,
+    marginBottom: 18,
+  },
+  expModalCatGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'flex-start',
+    gap: 10,
+    marginBottom: 16,
+  },
+  expModalCatTag: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 20,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: EXP_MODAL_BORDER,
+  },
+  expModalCatTagActive: {
+    backgroundColor: EXP_MODAL_ACTIVE_BG,
+    borderWidth: 2,
+    borderColor: EXP_MODAL_VIOLET,
+  },
+  expModalCatTagIcon: {
+    fontSize: 15,
+  },
+  expModalCatTagLabel: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: EXP_MODAL_NAVY,
+  },
+  expModalRecurringCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: EXP_MODAL_GRAY_BG,
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 16,
+    gap: 12,
+  },
+  expModalRecurringCopy: {
+    flex: 1,
+    gap: 4,
+  },
+  expModalRecurringTitle: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: EXP_MODAL_NAVY,
+    letterSpacing: -0.2,
+  },
+  expModalRecurringSub: {
+    fontSize: 12,
+    fontWeight: '500',
+    color: '#6B7280',
+    lineHeight: 16,
+  },
+  expModalLogBtn: {
+    borderRadius: 16,
+    paddingVertical: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 8,
+  },
+  expModalLogBtnActive: {
+    backgroundColor: EXP_MODAL_VIOLET,
+  },
+  expModalLogBtnDisabled: {
+    backgroundColor: EXP_MODAL_VIOLET,
+    opacity: 0.38,
+  },
+  expModalLogBtnTxt: {
+    fontSize: 15,
+    fontWeight: '800',
+    letterSpacing: 1.2,
+    color: '#FFFFFF',
+  },
+  expModalLogBtnTxtDisabled: {
+    color: '#FFFFFF',
+    opacity: 0.85,
+  },
+  expModalKeypadLight: {
+    marginHorizontal: -WHITE_PAD,
+    backgroundColor: EXP_MODAL_KEYPAD,
+    paddingTop: 12,
+    paddingHorizontal: 8,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: EXP_MODAL_BORDER,
+  },
+  expModalKeypadRow: {
+    flexDirection: 'row',
+    marginBottom: 4,
+  },
+  expModalKeyBare: {
+    flex: 1,
+    height: 54,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'transparent',
+  },
+  expModalKeyBareTxt: {
+    fontSize: 26,
+    fontWeight: '500',
+    color: EXP_MODAL_NAVY,
     fontFamily: FONT_MONO as string,
   },
 
