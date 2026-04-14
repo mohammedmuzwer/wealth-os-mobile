@@ -33,6 +33,7 @@ const SPRING = { damping: 16, stiffness: 120, mass: 0.8 };
 
 export interface DailyBudgetCardProps {
   cardSize: number;
+  leftOffset?: number;
   dailySpent: number;
   dailyLimit: number;
   setDailyLimit: (n: number) => void;
@@ -44,6 +45,7 @@ export interface DailyBudgetCardProps {
 
 export const DailyBudgetCard: React.FC<DailyBudgetCardProps> = ({
   cardSize,
+  leftOffset = 0,
   dailySpent,
   dailyLimit,
   setDailyLimit,
@@ -103,7 +105,7 @@ export const DailyBudgetCard: React.FC<DailyBudgetCardProps> = ({
   });
 
   return (
-    <Animated.View style={[{ position: 'absolute', left: 0, height: cardSize, borderRadius: 24 }, wrapperAnimatedStyle]}>
+    <Animated.View style={[{ position: 'absolute', left: leftOffset, height: cardSize, borderRadius: 24 }, wrapperAnimatedStyle]}>
         <Animated.View style={[styles.face, frontAnimatedStyle]}>
           <Pressable
             style={({ pressed }) => [styles.budgetCard, pressed && styles.budgetCardPressed]}
@@ -127,7 +129,6 @@ export const DailyBudgetCard: React.FC<DailyBudgetCardProps> = ({
                   ₹{dailySpent.toLocaleString('en-IN')}
                 </Text>
                 <Text style={styles.ratioLimit}>
-                  {' '}
                   / {dailyLimit.toLocaleString('en-IN')}
                 </Text>
               </View>
@@ -136,7 +137,7 @@ export const DailyBudgetCard: React.FC<DailyBudgetCardProps> = ({
         </Animated.View>
 
         <Animated.View style={[styles.backFace, backAnimatedStyle]}>
-          <View>
+          <View style={styles.backContent}>
             <View style={styles.backTopRow}>
               <Text style={styles.backLabelMuted}>DAILY BUDGET</Text>
               <Text style={styles.backCriticalTag}>CRITICAL LIMIT</Text>
@@ -231,12 +232,11 @@ const styles = StyleSheet.create({
   ratioRow: {
     flexDirection: 'row',
     alignItems: 'baseline',
-    width: '100%',
+    alignSelf: 'flex-start',
     minWidth: 0,
+    gap: 4,
   },
   ratioSpend: {
-    flex: 1,
-    minWidth: 0,
     fontSize: 24,
     fontWeight: '900',
     color: '#FFFFFF',
@@ -258,10 +258,13 @@ const styles = StyleSheet.create({
     backfaceVisibility: 'hidden',
     backgroundColor: '#1A1A2E',
     borderRadius: 24,
-    padding: 20,
+    padding: 14,
     flex: 1,
     justifyContent: 'space-between',
     overflow: 'hidden',
+  },
+  backContent: {
+    flexShrink: 1,
   },
   backTopRow: {
     flexDirection: 'row',
@@ -285,11 +288,11 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'baseline',
     gap: 8,
-    marginTop: 4,
+    marginTop: 0,
   },
   backAmountPurple: {
     flex: 1,
-    fontSize: 28,
+    fontSize: 22,
     fontWeight: '900',
     color: VIOLET,
     letterSpacing: -1,
@@ -302,19 +305,19 @@ const styles = StyleSheet.create({
     fontFamily: FONT_MONO as string,
   },
   sliderSection: {
-    marginTop: 8,
-    marginBottom: 4,
+    marginTop: 4,
+    marginBottom: 0,
   },
   sliderHint: {
     fontSize: 11,
     fontWeight: '600',
     color: 'rgba(255,255,255,0.35)',
-    marginBottom: 8,
+    marginBottom: 4,
   },
   sliderTrackWrap: {
     position: 'relative',
     justifyContent: 'center',
-    minHeight: 40,
+    minHeight: 30,
   },
   criticalMarker: {
     position: 'absolute',
@@ -327,14 +330,16 @@ const styles = StyleSheet.create({
     opacity: 0.95,
     zIndex: 0,
   },
-  slider: { width: '100%', height: 40, zIndex: 1 },
+  slider: { width: '100%', height: 30, zIndex: 1 },
   doneBtn: {
     width: '100%',
-    height: 50,
+    height: 40,
     borderRadius: 12,
     backgroundColor: VIOLET,
     justifyContent: 'center',
     alignItems: 'center',
+    marginTop: 8,
+    marginBottom: 0,
   },
   doneBtnTxt: {
     fontSize: 15,

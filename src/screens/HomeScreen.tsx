@@ -13,6 +13,7 @@ import {
   StatusBar, TouchableOpacity, Animated, useWindowDimensions, Dimensions,
   Modal, Pressable, TextInput, Switch, Platform, PanResponder,
 } from 'react-native';
+import * as Haptics from 'expo-haptics';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Circle, G } from 'react-native-svg';
 import { useFinancials } from '../hooks/useFinancials';
@@ -71,9 +72,10 @@ const TEAL         = '#22D3EE';
 const CYBER_YELLOW = '#FFD700';
 
 // ─── Layout constants ─────────────────────────────────────────────────────────
-const HERO_S    = 140;   // Figma parity
+const HERO_S    = 170;   // +5% from current size
 const HERO_STR  = 12;
 const HERO_GAP  = 2;     // crisp visual ring gap
+const HERO_RING_DATA_GAP = Math.round(HERO_S * 0.2375);
 const CURVE     = 28;    // white section overlaps navy by this many px
 const WHITE_PAD = 20;
 const CARD_GAP  = 12;
@@ -140,10 +142,13 @@ const Arc: React.FC<ArcProps> = ({ cx, cy, r, color, progress, sw = HERO_STR }) 
 interface HeroRingsProps { shieldPct: number; trackPct: number; buildPct: number; score: number; }
 
 const HeroRings: React.FC<HeroRingsProps> = ({ shieldPct, trackPct, buildPct, score }) => {
-  const S = HERO_S; const cx = 70; const cy = 70;
-  const rO = 56;
-  const rM = 42;
-  const rI = 28;
+  const S = HERO_S;
+  const cx = S / 2;
+  const cy = S / 2;
+  const ringStep = S * 0.1 * 0.95; // reduce inter-ring gap by 5%
+  const rO = S * 0.4;
+  const rM = rO - ringStep;
+  const rI = rM - ringStep;
   const tierColor = getTierColor(score);
   const tierLabel = getTierLabel(score);
   const pulse = useRef(new Animated.Value(1)).current;
@@ -174,18 +179,15 @@ const HeroRings: React.FC<HeroRingsProps> = ({ shieldPct, trackPct, buildPct, sc
 
 const rg = StyleSheet.create({
   centre: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' },
-  score:  { fontSize: 36, fontWeight: '900', letterSpacing: -1.5, fontFamily: FONT_MONO as string },
-  tier:   { fontSize: 8, fontWeight: '800', letterSpacing: 2.5, marginTop: 3 },
+  score:  { fontSize: 27, lineHeight: 29, fontWeight: '900', letterSpacing: -1, fontFamily: FONT_MONO as string },
+  tier:   { fontSize: 7, lineHeight: 9, fontWeight: '800', letterSpacing: 1.2, marginTop: 1 },
 });
 
 // ─── Metric Badge ─────────────────────────────────────────────────────────────
 
 const MetricBadge: React.FC<{ icon: string; label: string; value: string; color: string }> =
-  ({ icon, label, value, color }) => (
+  ({ label, value, color }) => (
     <View style={mb.row}>
-      <View style={[mb.badge, { backgroundColor: color + '26' }]}>
-        <Text style={mb.icon}>{icon}</Text>
-      </View>
       <View>
         <Text style={mb.label}>{label}</Text>
         <Text style={[mb.value, { color }]}>{value}</Text>
@@ -194,11 +196,9 @@ const MetricBadge: React.FC<{ icon: string; label: string; value: string; color:
   );
 
 const mb = StyleSheet.create({
-  row:   { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  badge: { width: 28, height: 28, borderRadius: 999, alignItems: 'center', justifyContent: 'center' },
-  icon:  { fontSize: 14 },
+  row:   { minHeight: Math.round((HERO_S / 3) * 0.9), justifyContent: 'center' },
   label: { fontSize: 12, fontWeight: '600', color: '#E5E7EB', letterSpacing: 0.6, textTransform: 'uppercase' },
-  value: { fontSize: 16, fontWeight: '800', letterSpacing: -0.3, fontFamily: FONT_MONO as string },
+  value: { fontSize: 19, lineHeight: 22, fontWeight: '600', letterSpacing: -0.3, fontFamily: FONT_MONO as string },
 });
 
 // ─── Budget Arc ───────────────────────────────────────────────────────────────
@@ -232,6 +232,13 @@ const NavItem: React.FC<{ icon: string; label: string; active: boolean; onPress:
 
 type TabKey = 'Daily' | 'Weekly' | 'Monthly';
 type NavKey  = 'home' | 'spend' | 'invest' | 'more';
+type CoinAnim = {
+  id: number;
+  x: Animated.Value;
+  y: Animated.Value;
+  scale: Animated.Value;
+  opacity: Animated.Value;
+};
 
 // ─── HomeScreen ───────────────────────────────────────────────────────────────
 
@@ -241,13 +248,25 @@ export const HomeScreen: React.FC = () => {
   const insets = useSafeAreaInsets();
   const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
   const HEADER_HEIGHT = SCREEN_HEIGHT * 0.40;
-  const CARD_SIZE = (SCREEN_WIDTH - 40) * 0.48;
+  const CARD_ROW_WIDTH = SCREEN_WIDTH - 40;
+  const CARD_SIZE = CARD_ROW_WIDTH * 0.48 * 0.9025;
+  const CARD_CENTER_GAP = CARD_ROW_WIDTH * 0.03;
+  const CARD_ROW_SIDE_MARGIN = Math.max(
+    0,
+    (CARD_ROW_WIDTH - CARD_SIZE * 2 - CARD_CENTER_GAP) / 2,
+  );
   const scrollY = useRef(new Animated.Value(0)).current;
   /** Let expanded activity tabs receive touches only when sheet is scrolled up (opacity > 0). */
   const [sheetExpandedForInput, setSheetExpandedForInput] = useState(false);
 
   const [activeTab, setActiveTab] = useState<TabKey>('Daily');
   const [activeNav, setActiveNav] = useState<NavKey>('home');
+  const [coinAnims, setCoinAnims] = useState<CoinAnim[]>([]);
+  const coinAnimIdRef = useRef(0);
+  const rootRef = useRef<View>(null);
+  const heroRingsRef = useRef<View>(null);
+  const sweepPillRef = useRef<View>(null);
+  const sweepPressAnim = useRef(new Animated.Value(0)).current;
 
   const [isExpenseModalVisible, setIsExpenseModalVisible] = useState(false);
   const [expenseAmount, setExpenseAmount] = useState('0');
@@ -255,7 +274,6 @@ export const HomeScreen: React.FC = () => {
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   const [isRecurring, setIsRecurring] = useState(false);
 
-  const suggestedDailyLimit = Math.round(summary.income > 0 ? summary.income * 0.1 / 30 : 0);
   const [dailySpent] = useState(200);
   const [dailyLimit, setDailyLimit] = useState(459);
 
@@ -317,20 +335,22 @@ export const HomeScreen: React.FC = () => {
   });
 
   const cardSize = Math.round(CARD_SIZE);
-  const arcSize  = Math.round(cardSize * 0.38);
+  const arcSize  = Math.round(cardSize * 0.3);
 
   /** Expanded: pull ledger up under absolute filters (layout phantom from faded grid). Not animated. */
   const txListOverlapExpanded = Math.round(cardSize + SHEET_SECTION_GAP * 2 + 28);
+  /** Expanded-only inset so first transactions start below sticky tabs instead of hiding under them. */
+  const txListExpandedTopInset = Math.round(EXPANDED_ACTIVITY_TOP + 132);
 
   const METRICS = [
-    { icon: '🛡️', label: 'Shield', value: `₹${suggestedDailyLimit.toLocaleString('en-IN')}`,  color: SHIELD_RED  },
+    { icon: '🛡️', label: 'Shield', value: `${fmt(dailySpent)} / ${fmt(dailyLimit)}`,          color: SHIELD_RED  },
     { icon: '🎯', label: 'Track',  value: fmt(Math.max(0, summary.income - summary.expenses)), color: BUILD_GREEN },
     { icon: '📈', label: 'Build',  value: fmt(Math.max(0, summary.savings ?? 0)),               color: '#3182CE'   },
   ];
 
   const windowHeight = Dimensions.get('window').height;
-  /** Align scroll spacer with fixed navy (30%) so white sheet occupies ~70% below the fold on load. */
-  const scrollTransparentSpacerHeight = HEADER_HEIGHT;
+  /** Pull white sheet up by 10% while keeping navy header unchanged. */
+  const scrollTransparentSpacerHeight = HEADER_HEIGHT * 0.9;
   const transactions = DUMMY_TRANSACTIONS;
 
   useEffect(() => {
@@ -370,6 +390,85 @@ export const HomeScreen: React.FC = () => {
 
   const closeExpenseModalRef = useRef(closeExpenseModal);
   closeExpenseModalRef.current = closeExpenseModal;
+
+  const measureCenterInRoot = useCallback(
+    (viewRef: React.RefObject<View>) =>
+      new Promise<{ x: number; y: number } | null>((resolve) => {
+        if (!viewRef.current || !rootRef.current) {
+          resolve(null);
+          return;
+        }
+        rootRef.current.measureInWindow((rootX, rootY) => {
+          viewRef.current?.measureInWindow((x, y, w, h) => {
+            resolve({ x: x - rootX + w / 2, y: y - rootY + h / 2 });
+          });
+        });
+      }),
+    [],
+  );
+
+  const launchVaultCoins = useCallback(async () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+    const [from, to] = await Promise.all([
+      measureCenterInRoot(sweepPillRef),
+      measureCenterInRoot(heroRingsRef),
+    ]);
+    if (!from || !to) return;
+
+    const burst = Array.from({ length: 8 }).map((_, i) => {
+      const id = ++coinAnimIdRef.current;
+      const lane = (i % 4) - 1.5;
+      const x = new Animated.Value(from.x + lane * 4);
+      const y = new Animated.Value(from.y + Math.floor(i / 4) * 2);
+      const scale = new Animated.Value(0.82);
+      const opacity = new Animated.Value(0);
+      return { id, x, y, scale, opacity };
+    });
+
+    setCoinAnims(prev => [...prev, ...burst]);
+
+    burst.forEach((coin, i) => {
+      const drift = ((i % 4) - 1.5) * 7;
+      Animated.sequence([
+        Animated.delay(i * 55),
+        Animated.parallel([
+          Animated.timing(coin.opacity, { toValue: 1, duration: 80, useNativeDriver: true }),
+          Animated.sequence([
+            Animated.timing(coin.y, { toValue: from.y - 14 - i * 2, duration: 120, useNativeDriver: true }),
+            Animated.timing(coin.y, { toValue: to.y + 2, duration: 540, useNativeDriver: true }),
+          ]),
+          Animated.sequence([
+            Animated.timing(coin.x, { toValue: from.x + 8 + i * 1.5, duration: 120, useNativeDriver: true }),
+            Animated.timing(coin.x, { toValue: to.x + drift, duration: 540, useNativeDriver: true }),
+          ]),
+          Animated.sequence([
+            Animated.timing(coin.scale, { toValue: 1.06, duration: 180, useNativeDriver: true }),
+            Animated.timing(coin.scale, { toValue: 0.64, duration: 480, useNativeDriver: true }),
+          ]),
+          Animated.sequence([
+            Animated.delay(500),
+            Animated.timing(coin.opacity, { toValue: 0, duration: 180, useNativeDriver: true }),
+          ]),
+        ]),
+      ]).start(() => setCoinAnims(prev => prev.filter(c => c.id !== coin.id)));
+    });
+  }, [measureCenterInRoot]);
+
+  const onSweepPressIn = useCallback(() => {
+    Animated.timing(sweepPressAnim, {
+      toValue: 1,
+      duration: 90,
+      useNativeDriver: true,
+    }).start();
+  }, [sweepPressAnim]);
+
+  const onSweepPressOut = useCallback(() => {
+    Animated.timing(sweepPressAnim, {
+      toValue: 0,
+      duration: 120,
+      useNativeDriver: true,
+    }).start();
+  }, [sweepPressAnim]);
 
   const expenseSheetPan = useMemo(
     () =>
@@ -524,7 +623,7 @@ export const HomeScreen: React.FC = () => {
   );
 
   return (
-    <SafeAreaView style={s.mainContainer}>
+    <SafeAreaView ref={rootRef} style={s.mainContainer}>
       <StatusBar barStyle="light-content" backgroundColor={D.bg} />
 
       {/* ── NAVY HEADER — fixed 40% height ─────────────────────────────────── */}
@@ -532,7 +631,8 @@ export const HomeScreen: React.FC = () => {
         style={{
           ...s.navyHeaderFixed,
           height: Dimensions.get('window').height * 0.40,
-          paddingTop: insets.top + 16,
+          paddingTop: insets.top + 10,
+          paddingBottom: 8,
           paddingHorizontal: 24,
           backgroundColor: '#0A0E17',
         }}
@@ -551,8 +651,8 @@ export const HomeScreen: React.FC = () => {
           ]}
         />
 
-        {/* 1. TOP GREETING (Anchored to top padding) */}
-        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+        {/* 1. TOP GREETING (Locked to the top) */}
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', height: 40 }}>
           <View>
             <Text style={s.greeting}>Hi, Welcome Back</Text>
             <Text style={s.greetingSub}>Good Morning</Text>
@@ -563,14 +663,16 @@ export const HomeScreen: React.FC = () => {
           </View>
         </View>
 
-        {/* 2. BOTTOM GROUP (Rings + Insight anchored to the bottom) */}
+        {/* 2. THE GRAVITY BOX (Takes up 100% of the remaining space and centers everything inside it) */}
         <View
           style={{
             flex: 1,
-            justifyContent: 'flex-end',
-            paddingBottom: 32,
+            justifyContent: 'center',
+            alignItems: 'center',
+            paddingTop: 32,
           }}
         >
+          {/* THE RINGS */}
           <View
             style={{
               flexDirection: 'row',
@@ -579,12 +681,14 @@ export const HomeScreen: React.FC = () => {
               width: '100%',
             }}
           >
-            <HeroRings
-              shieldPct={summary.shieldPct}
-              trackPct={summary.trackPct}
-              buildPct={summary.buildPct}
-              score={summary.wealthScore}
-            />
+            <View ref={heroRingsRef} collapsable={false}>
+              <HeroRings
+                shieldPct={summary.shieldPct}
+                trackPct={summary.trackPct}
+                buildPct={summary.buildPct}
+                score={summary.wealthScore}
+              />
+            </View>
             <View style={s.metricStack}>
               {METRICS.map(m => (
                 <MetricBadge key={m.label} icon={m.icon} label={m.label} value={m.value} color={m.color} />
@@ -592,7 +696,8 @@ export const HomeScreen: React.FC = () => {
             </View>
           </View>
 
-          <View style={{ alignSelf: 'center', marginTop: 24 }}>
+          {/* THE AI INSIGHT PILL */}
+          <View style={{ alignSelf: 'center', marginTop: 18 }}>
             <TouchableOpacity style={s.insightPill} activeOpacity={0.75}>
               <Text style={s.insightSpark}>✦</Text>
               <Text style={s.insightText} numberOfLines={1}>
@@ -650,16 +755,46 @@ export const HomeScreen: React.FC = () => {
             <View style={s.sheetHandle} />
 
             <Animated.View style={[{ opacity: squareOpacity, transform: [{ translateY: squareTranslateY }] }]}>
-              <View style={{ height: CARD_SIZE, width: '100%', position: 'relative', marginTop: 20 }}>
+              <View style={{ height: CARD_SIZE, width: '100%', position: 'relative', marginTop: Math.max(0, 20 - CARD_SIZE * 0.03) }}>
                 {/* Yellow Vault Sweep Card (Static Background) */}
-                <View style={{ position: 'absolute', right: 0, width: CARD_SIZE, height: CARD_SIZE, borderRadius: 24, overflow: 'hidden' }}>
+                <View style={{ position: 'absolute', right: CARD_ROW_SIDE_MARGIN, width: CARD_SIZE, height: CARD_SIZE, borderRadius: 24, overflow: 'hidden' }}>
                   <View style={s.vaultCard}>
                     <View style={s.vaultTopRow}>
                       <View style={s.vaultIndicator}><Text style={{ fontSize: 13 }}>💛</Text></View>
-                      <TouchableOpacity style={s.sweepPill} activeOpacity={0.85}>
-                        <Text style={s.sweepPillIcon}>◎</Text>
-                        <Text style={s.sweepPillTxt}>SWEEP{'\n'}TO VAULT</Text>
-                      </TouchableOpacity>
+                      <Animated.View
+                        ref={sweepPillRef}
+                        collapsable={false}
+                        style={[
+                          s.sweepPillPressWrap,
+                          {
+                            transform: [
+                              {
+                                translateY: sweepPressAnim.interpolate({
+                                  inputRange: [0, 1],
+                                  outputRange: [0, 2],
+                                }),
+                              },
+                              {
+                                scale: sweepPressAnim.interpolate({
+                                  inputRange: [0, 1],
+                                  outputRange: [1, 0.97],
+                                }),
+                              },
+                            ],
+                          },
+                        ]}
+                      >
+                        <TouchableOpacity
+                          style={s.sweepPill}
+                          activeOpacity={1}
+                          onPressIn={onSweepPressIn}
+                          onPressOut={onSweepPressOut}
+                          onPress={launchVaultCoins}
+                        >
+                          <Text style={s.sweepPillIcon}>◎</Text>
+                          <Text style={s.sweepPillTxt}>SWEEP{'\n'}TO VAULT</Text>
+                        </TouchableOpacity>
+                      </Animated.View>
                     </View>
                     <View style={s.vaultBottom}>
                       <Text style={s.vaultLabel}>VAULT SWEEP</Text>
@@ -679,6 +814,7 @@ export const HomeScreen: React.FC = () => {
                 {/* Flipping Daily Budget Card (Animated Overlay) */}
                 <DailyBudgetCard
                   cardSize={CARD_SIZE}
+                  leftOffset={CARD_ROW_SIDE_MARGIN}
                   dailySpent={dailySpent}
                   dailyLimit={dailyLimit}
                   setDailyLimit={setDailyLimit}
@@ -747,7 +883,7 @@ export const HomeScreen: React.FC = () => {
             </Animated.View>
 
             {!sheetExpandedForInput && (
-              <Animated.View style={{ opacity: activityHeaderOpacity, marginTop: 0 }}>
+              <Animated.View style={{ opacity: activityHeaderOpacity, marginTop: Math.round(CARD_SIZE * 0.1) }}>
                 <View style={s.activityHeader}>
                   <Text style={s.activityTitle}>Recent Activity</Text>
                   <View style={s.tabStrip}>
@@ -771,7 +907,7 @@ export const HomeScreen: React.FC = () => {
           style={[
             s.txListShell,
             { minHeight: windowHeight },
-            sheetExpandedForInput && { marginTop: -txListOverlapExpanded },
+            sheetExpandedForInput && { marginTop: -txListOverlapExpanded, paddingTop: txListExpandedTopInset },
           ]}
         >
           {transactions.map((tx, i) => (
@@ -790,6 +926,29 @@ export const HomeScreen: React.FC = () => {
           ))}
         </Animated.View>
       </Animated.ScrollView>
+
+      <View pointerEvents="none" style={s.coinOverlay}>
+        {coinAnims.map(coin => (
+          <Animated.View
+            key={coin.id}
+            style={[
+              s.coinShape,
+              {
+                opacity: coin.opacity,
+                transform: [
+                  { translateX: coin.x },
+                  { translateY: coin.y },
+                  { scale: coin.scale },
+                ],
+              },
+            ]}
+          >
+            <View style={s.coinInner}>
+              <View style={s.coinShine} />
+            </View>
+          </Animated.View>
+        ))}
+      </View>
 
       {/* ── TAB BAR ───────────────────────────────────────────────────────── */}
       <Animated.View style={[s.floatingFooter, { transform: [{ translateY: footerTranslateY }] }]} pointerEvents="box-none">
@@ -883,7 +1042,7 @@ const s = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
     gap: 42, paddingHorizontal: 16,
   },
-  metricStack: { height: HERO_S, justifyContent: 'space-between' },
+  metricStack: { height: HERO_S, justifyContent: 'center', alignSelf: 'center', marginLeft: HERO_RING_DATA_GAP },
 
   // Insight pill — pinned at base of navy section
   insightPill: {
@@ -1004,7 +1163,30 @@ const s = StyleSheet.create({
   },
   vaultTopRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   vaultIndicator: { width: 28, height: 28, borderRadius: 14, backgroundColor: 'rgba(0,0,0,0.12)', alignItems: 'center', justifyContent: 'center' },
-  sweepPill: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: CYBER_YELLOW, borderRadius: 50, borderWidth: 1.5, borderColor: 'rgba(0,0,0,0.20)', paddingHorizontal: 8, paddingVertical: 5 },
+  sweepPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: CYBER_YELLOW,
+    borderRadius: 50,
+    borderWidth: 1.5,
+    borderColor: 'rgba(0,0,0,0.20)',
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.28,
+    shadowRadius: 3,
+    elevation: 4,
+  },
+  sweepPillPressWrap: {
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.32,
+    shadowRadius: 4,
+    elevation: 5,
+    borderRadius: 50,
+  },
   sweepPillIcon: { fontSize: 11, color: '#1A1005' },
   sweepPillTxt: { fontSize: 7, fontWeight: '900', color: '#1A1005', letterSpacing: 0.4, lineHeight: 9 },
   vaultBottom: { gap: 1, width: '100%', minWidth: 0 },
@@ -1305,6 +1487,39 @@ const s = StyleSheet.create({
     shadowOpacity: 0.6, shadowRadius: 18, elevation: 16,
   },
   fabIcon: { fontSize: 34, color: '#FFFFFF', fontWeight: '300', lineHeight: 38, marginTop: -2 },
+
+  coinOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 80,
+    elevation: 80,
+  },
+  coinShape: {
+    position: 'absolute',
+    left: -6,
+    top: -6,
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    backgroundColor: '#F6C744',
+    borderWidth: 1,
+    borderColor: '#C99212',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  coinInner: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#FFD86B',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  coinShine: {
+    width: 3,
+    height: 3,
+    borderRadius: 2,
+    backgroundColor: 'rgba(255,245,200,0.9)',
+  },
 
   navyBlurOverlay: {
     ...StyleSheet.absoluteFillObject,
