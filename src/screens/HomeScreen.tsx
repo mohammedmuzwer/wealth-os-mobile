@@ -18,6 +18,8 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Circle, G } from 'react-native-svg';
 import { useFinancials } from '../hooks/useFinancials';
 import { DailyBudgetCard } from '../components/DailyBudgetCard';
+import { MoreScreen } from './MoreScreen';
+import { IncomeEngineScreen } from './IncomeEngineScreen';
 import {
   SHIELD_RED, BUILD_GREEN, VAULT_GOLD, PURPLE, NAVY,
   TEXT_PRIMARY, TEXT_MUTED,
@@ -261,6 +263,7 @@ export const HomeScreen: React.FC = () => {
 
   const [activeTab, setActiveTab] = useState<TabKey>('Daily');
   const [activeNav, setActiveNav] = useState<NavKey>('home');
+  const [activeRootTab, setActiveRootTab] = useState<'Home' | 'More' | 'IncomeEngine'>('Home');
   const [coinAnims, setCoinAnims] = useState<CoinAnim[]>([]);
   const coinAnimIdRef = useRef(0);
   const rootRef = useRef<View>(null);
@@ -950,14 +953,46 @@ export const HomeScreen: React.FC = () => {
         ))}
       </View>
 
+      {activeRootTab === 'More' && (
+        <View
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            zIndex: 40,
+            backgroundColor: '#0A0E17',
+          }}
+        >
+          <MoreScreen onIncomeEnginePress={() => setActiveRootTab('IncomeEngine')} />
+        </View>
+      )}
+
+      {activeRootTab === 'IncomeEngine' && (
+        <View
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            zIndex: 40,
+            backgroundColor: '#0A0E17',
+          }}
+        >
+          <IncomeEngineScreen />
+        </View>
+      )}
+
       {/* ── TAB BAR ───────────────────────────────────────────────────────── */}
       <Animated.View style={[s.floatingFooter, { transform: [{ translateY: footerTranslateY }] }]} pointerEvents="box-none">
       <View style={s.tabBar}>
-        <NavItem icon="⌂"  label="Home"   active={activeNav === 'home'}   onPress={() => setActiveNav('home')}   />
-        <NavItem icon="💳" label="Spend"  active={activeNav === 'spend'}  onPress={() => setActiveNav('spend')}  />
+        <NavItem icon="⌂"  label="Home"   active={activeNav === 'home'}   onPress={() => { setActiveNav('home'); setActiveRootTab('Home'); }}   />
+        <NavItem icon="💳" label="Spend"  active={activeNav === 'spend'}  onPress={() => { setActiveNav('spend'); setActiveRootTab('Home'); }}  />
         <View style={s.fabSlot} />
-        <NavItem icon="📊" label="Invest" active={activeNav === 'invest'} onPress={() => setActiveNav('invest')} />
-        <NavItem icon="⋯"  label="More"   active={activeNav === 'more'}   onPress={() => setActiveNav('more')}   />
+        <NavItem icon="📊" label="Invest" active={activeNav === 'invest'} onPress={() => { setActiveNav('invest'); setActiveRootTab('Home'); }} />
+        <NavItem icon="⋯"  label="More"   active={activeNav === 'more'}   onPress={() => { setActiveNav('more'); setActiveRootTab('More'); }}   />
 
         <View style={s.fabAbsWrap} pointerEvents="box-none">
           <TouchableOpacity style={s.fab} onPress={() => setIsExpenseModalVisible(true)} activeOpacity={0.85}>
