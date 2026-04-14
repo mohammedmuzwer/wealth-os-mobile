@@ -2,7 +2,7 @@
  * DailyBudgetCard — 3D flip (Reanimated) + slider on back face.
  */
 
-import React, { useState } from 'react';
+import React from 'react';
 import {
   View,
   Text,
@@ -40,6 +40,7 @@ export interface DailyBudgetCardProps {
   /** Upper bound for slider & red marker (e.g. income-derived critical cap). */
   criticalLimit: number;
   sliderMin?: number;
+  sliderMax?: number;
   arcSlot: React.ReactNode;
 }
 
@@ -51,24 +52,22 @@ export const DailyBudgetCard: React.FC<DailyBudgetCardProps> = ({
   setDailyLimit,
   criticalLimit,
   sliderMin = 50,
+  sliderMax,
   arcSlot,
 }) => {
   const flipProgress = useSharedValue(0);
-  const [tempLimit, setTempLimit] = useState(dailyLimit);
 
-  const sliderMax = Math.max(criticalLimit, dailyLimit + 200, sliderMin + 100);
+  const computedSliderMax = sliderMax ?? Math.max(criticalLimit, dailyLimit + 200, sliderMin + 100);
   const markerPct = Math.min(
     1,
-    Math.max(0, (criticalLimit - sliderMin) / (sliderMax - sliderMin)),
+    Math.max(0, (criticalLimit - sliderMin) / (computedSliderMax - sliderMin)),
   );
 
   const openFlip = () => {
-    setTempLimit(dailyLimit);
     flipProgress.value = withSpring(1, SPRING);
   };
 
   const closeFlip = () => {
-    setDailyLimit(tempLimit);
     flipProgress.value = withSpring(0, SPRING);
   };
 
@@ -126,10 +125,10 @@ export const DailyBudgetCard: React.FC<DailyBudgetCardProps> = ({
                   adjustsFontSizeToFit
                   minimumFontScale={0.6}
                 >
-                  ₹{dailySpent.toLocaleString('en-IN')}
+                  ₹{dailySpent.toFixed(0)}
                 </Text>
                 <Text style={styles.ratioLimit}>
-                  / {dailyLimit.toLocaleString('en-IN')}
+                  / {dailyLimit.toFixed(0)}
                 </Text>
               </View>
             </View>
@@ -149,10 +148,10 @@ export const DailyBudgetCard: React.FC<DailyBudgetCardProps> = ({
                 adjustsFontSizeToFit
                 minimumFontScale={0.55}
               >
-                ₹{Math.round(tempLimit).toLocaleString('en-IN')}
+                ₹{dailyLimit.toFixed(0)}
               </Text>
               <Text style={styles.backAmountRed}>
-                ₹{criticalLimit.toLocaleString('en-IN')}
+                ₹{criticalLimit.toFixed(0)}
               </Text>
             </View>
 
@@ -165,10 +164,10 @@ export const DailyBudgetCard: React.FC<DailyBudgetCardProps> = ({
                 />
                 <Slider
                   style={styles.slider}
-                  minimumValue={sliderMin}
-                  maximumValue={sliderMax}
-                  value={tempLimit}
-                  onValueChange={val => setTempLimit(Math.round(val))}
+                  minimumValue={0}
+                  maximumValue={computedSliderMax}
+                  value={dailyLimit}
+                  onValueChange={val => setDailyLimit(val)}
                   minimumTrackTintColor={VIOLET}
                   maximumTrackTintColor={TRACK_MAX}
                   thumbTintColor={VIOLET_LIGHT}
@@ -330,7 +329,7 @@ const styles = StyleSheet.create({
     opacity: 0.95,
     zIndex: 0,
   },
-  slider: { width: '100%', height: 30, zIndex: 1 },
+  slider: { width: '100%', height: 34, zIndex: 1 },
   doneBtn: {
     width: '100%',
     height: 40,

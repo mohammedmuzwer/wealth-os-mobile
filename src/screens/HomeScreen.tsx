@@ -11,12 +11,14 @@ import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react'
 import {
   View, Text, StyleSheet, SafeAreaView,
   StatusBar, TouchableOpacity, Animated, useWindowDimensions, Dimensions,
-  Modal, Pressable, TextInput, Switch, Platform, PanResponder,
+  Modal, Pressable, TextInput, Switch, Platform, PanResponder, RefreshControl,
 } from 'react-native';
 import * as Haptics from 'expo-haptics';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Circle, G } from 'react-native-svg';
 import { useFinancials } from '../hooks/useFinancials';
+import { useWealth } from '../context/WealthContext';
 import { DailyBudgetCard } from '../components/DailyBudgetCard';
 import { MoreScreen } from './MoreScreen';
 import { IncomeEngineScreen } from './IncomeEngineScreen';
@@ -26,7 +28,7 @@ import {
   getTierColor, getTierLabel,
   FONT_MONO, RADIUS_LG, RADIUS_PILL,
 } from '../theme/tokens';
-import { fmt, type ExpenseCategory } from '../utils/finance';
+import { fmt, type Expense, type ExpenseCategory } from '../utils/finance';
 
 /** Log modal — light theme tokens. */
 const EXP_MODAL_VIOLET   = '#7C3AED';
@@ -99,22 +101,22 @@ const EXPANDED_ACTIVITY_TOP = EXPANDED_PILLS_TOP + EXPANDED_PILL_ROW_MIN + SHEET
 
 interface Tx {
   id: string; emoji: string; iconBg: string;
-  name: string; sub: string; amount: number; positive: boolean;
+  name: string; sub: string; amount: number; positive: boolean; ts: number;
 }
 
 const DUMMY_TRANSACTIONS: Tx[] = [
-  { id: '1',  emoji: '☕', iconBg: '#FEF3E8', name: 'Costa Coffee',    sub: '08:30 AM · Café',          amount: 320,  positive: false },
-  { id: '2',  emoji: '🍱', iconBg: '#E8F0FE', name: 'Zomato',          sub: '01:15 PM · Food',          amount: 450,  positive: false },
-  { id: '3',  emoji: '⛽', iconBg: '#F0E8FE', name: 'BPCL Fuel',       sub: '06:45 PM · Transport',     amount: 1200, positive: false },
-  { id: '4',  emoji: '🚌', iconBg: '#E8F8F0', name: 'Metro Recharge',  sub: '09:00 AM · Transport',     amount: 200,  positive: false },
-  { id: '5',  emoji: '☕', iconBg: '#FEF3E8', name: 'Starbucks',       sub: '10:20 AM · Café',          amount: 380,  positive: false },
-  { id: '6',  emoji: '🥪', iconBg: '#FFF8E8', name: 'Subway',          sub: '12:45 PM · Food',          amount: 290,  positive: false },
-  { id: '7',  emoji: '📱', iconBg: '#E8E8FE', name: 'Mobile Prepaid',  sub: '02:10 PM · Utilities',     amount: 499,  positive: false },
-  { id: '8',  emoji: '🏪', iconBg: '#F0FEE8', name: 'Quick Mart',      sub: '04:30 PM · Shopping',      amount: 160,  positive: false },
-  { id: '9',  emoji: '🍜', iconBg: '#FEE8F0', name: 'Swiggy',          sub: '08:00 PM · Food',          amount: 520,  positive: false },
-  { id: '10', emoji: '🎬', iconBg: '#E8F0FE', name: 'Movie Tickets',   sub: '09:15 PM · Entertainment', amount: 850,  positive: false },
-  { id: '11', emoji: '🚗', iconBg: '#E8E8FE', name: 'Uber',            sub: '07:20 PM · Transport',     amount: 340,  positive: false },
-  { id: '12', emoji: '🛒', iconBg: '#FEF3E8', name: 'DMart',           sub: 'Sat · Groceries',          amount: 2840, positive: false },
+  { id: '1',  emoji: '☕', iconBg: '#FEF3E8', name: 'Costa Coffee',    sub: '08:30 AM · Café',          amount: 320,  positive: false, ts: 0 },
+  { id: '2',  emoji: '🍱', iconBg: '#E8F0FE', name: 'Zomato',          sub: '01:15 PM · Food',          amount: 450,  positive: false, ts: 0 },
+  { id: '3',  emoji: '⛽', iconBg: '#F0E8FE', name: 'BPCL Fuel',       sub: '06:45 PM · Transport',     amount: 1200, positive: false, ts: 0 },
+  { id: '4',  emoji: '🚌', iconBg: '#E8F8F0', name: 'Metro Recharge',  sub: '09:00 AM · Transport',     amount: 200,  positive: false, ts: 0 },
+  { id: '5',  emoji: '☕', iconBg: '#FEF3E8', name: 'Starbucks',       sub: '10:20 AM · Café',          amount: 380,  positive: false, ts: 0 },
+  { id: '6',  emoji: '🥪', iconBg: '#FFF8E8', name: 'Subway',          sub: '12:45 PM · Food',          amount: 290,  positive: false, ts: 0 },
+  { id: '7',  emoji: '📱', iconBg: '#E8E8FE', name: 'Mobile Prepaid',  sub: '02:10 PM · Utilities',     amount: 499,  positive: false, ts: 0 },
+  { id: '8',  emoji: '🏪', iconBg: '#F0FEE8', name: 'Quick Mart',      sub: '04:30 PM · Shopping',      amount: 160,  positive: false, ts: 0 },
+  { id: '9',  emoji: '🍜', iconBg: '#FEE8F0', name: 'Swiggy',          sub: '08:00 PM · Food',          amount: 520,  positive: false, ts: 0 },
+  { id: '10', emoji: '🎬', iconBg: '#E8F0FE', name: 'Movie Tickets',   sub: '09:15 PM · Entertainment', amount: 850,  positive: false, ts: 0 },
+  { id: '11', emoji: '🚗', iconBg: '#E8E8FE', name: 'Uber',            sub: '07:20 PM · Transport',     amount: 340,  positive: false, ts: 0 },
+  { id: '12', emoji: '🛒', iconBg: '#FEF3E8', name: 'DMart',           sub: 'Sat · Groceries',          amount: 2840, positive: false, ts: 0 },
 ];
 
 // ─── Animated Arc ─────────────────────────────────────────────────────────────
@@ -141,9 +143,23 @@ const Arc: React.FC<ArcProps> = ({ cx, cy, r, color, progress, sw = HERO_STR }) 
 
 // ─── Hero Rings ───────────────────────────────────────────────────────────────
 
-interface HeroRingsProps { shieldPct: number; trackPct: number; buildPct: number; score: number; }
+interface HeroRingsProps {
+  shieldPct: number;
+  trackPct: number;
+  buildPct: number;
+  score: number;
+  shieldCircumference: number;
+  shieldOffset: number;
+}
 
-const HeroRings: React.FC<HeroRingsProps> = ({ shieldPct, trackPct, buildPct, score }) => {
+const HeroRings: React.FC<HeroRingsProps> = React.memo(({
+  shieldPct,
+  trackPct,
+  buildPct,
+  score,
+  shieldCircumference,
+  shieldOffset,
+}) => {
   const S = HERO_S;
   const cx = S / 2;
   const cy = S / 2;
@@ -167,7 +183,34 @@ const HeroRings: React.FC<HeroRingsProps> = ({ shieldPct, trackPct, buildPct, sc
   return (
     <View style={{ width: S, height: S }}>
       <Svg width={S} height={S} viewBox={`0 0 ${S} ${S}`}>
-        <Arc cx={cx} cy={cy} r={rO} color="#FF3B30" progress={shieldPct / 100} />
+        {/* --- OUTER RING: RED SHIELD --- */}
+        {/* 1. The Faded Background Track */}
+        <Circle
+          cx="85"
+          cy="85"
+          r="68"
+          stroke="#FF3B30"
+          strokeOpacity="0.2"
+          strokeWidth="12"
+          fill="none"
+        />
+
+        {/* 2. The Dynamic Progress Ring (With Crash Guards) */}
+        <Circle
+          cx="85"
+          cy="85"
+          r="68"
+          stroke="#FF3B30"
+          strokeWidth="12"
+          fill="none"
+          strokeLinecap="round"
+          strokeDasharray={shieldCircumference || 427}
+          strokeDashoffset={isNaN(shieldOffset) ? 0 : shieldOffset}
+          rotation="-90"
+          originX="85"
+          originY="85"
+        />
+        {/* -------------------------------- */}
         <Arc cx={cx} cy={cy} r={rM} color="#34C759" progress={trackPct  / 100} />
         <Arc cx={cx} cy={cy} r={rI} color="#32ADE6" progress={Math.min(buildPct, 100) / 100} />
       </Svg>
@@ -177,7 +220,7 @@ const HeroRings: React.FC<HeroRingsProps> = ({ shieldPct, trackPct, buildPct, sc
       </View>
     </View>
   );
-};
+});
 
 const rg = StyleSheet.create({
   centre: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' },
@@ -200,15 +243,23 @@ const MetricBadge: React.FC<{ icon: string; label: string; value: string; color:
 const mb = StyleSheet.create({
   row:   { minHeight: Math.round((HERO_S / 3) * 0.9), justifyContent: 'center' },
   label: { fontSize: 12, fontWeight: '600', color: '#E5E7EB', letterSpacing: 0.6, textTransform: 'uppercase' },
-  value: { fontSize: 19, lineHeight: 22, fontWeight: '600', letterSpacing: -0.3, fontFamily: FONT_MONO as string },
+  value: {
+    fontSize: 19,
+    lineHeight: 22,
+    fontWeight: '600',
+    letterSpacing: -0.3,
+    fontFamily: FONT_MONO as string,
+    minWidth: 132,
+  },
 });
 
 // ─── Budget Arc ───────────────────────────────────────────────────────────────
 
-const BudgetArc: React.FC<{ size: number }> = ({ size }) => {
+const BudgetArc: React.FC<{ size: number; progress: number }> = ({ size, progress }) => {
   const r = size / 2 - 7; const circ = 2 * Math.PI * r;
   const cx = size / 2; const cy = size / 2;
-  const fill = circ * 0.5;
+  const normalized = Math.max(0, Math.min(progress, 1));
+  const fill = circ * (1 - normalized);
   return (
     <Svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
       <G rotation="-90" origin={`${cx},${cy}`}>
@@ -242,10 +293,49 @@ type CoinAnim = {
   opacity: Animated.Value;
 };
 
+type IncomeSourceLog = {
+  id: number;
+  title: string;
+  date: string;
+  amount: string;
+  type: 'RECURRING' | 'MANUAL';
+  icon: 'briefcase' | 'palette' | 'home' | 'bank';
+  createdAt?: string;
+};
+
+const EXPENSE_LOG_KEY = 'wos_expense_log';
+const INCOME_SOURCES_KEY = 'income_engine_sources_v1';
+
+const EXPENSE_UI_MAP: Record<ExpenseCategory, { emoji: string; iconBg: string; label: string }> = {
+  food: { emoji: '🍔', iconBg: '#FEF3E8', label: 'Food' },
+  petrol: { emoji: '⛽', iconBg: '#F0E8FE', label: 'Transport' },
+  utilities: { emoji: '📱', iconBg: '#E8E8FE', label: 'Utilities' },
+  shopping: { emoji: '🛒', iconBg: '#FEE8F0', label: 'Shopping' },
+  other: { emoji: '🧾', iconBg: '#E8F0FE', label: 'Other' },
+};
+
 // ─── HomeScreen ───────────────────────────────────────────────────────────────
 
 export const HomeScreen: React.FC = () => {
   const { summary, addExpense }          = useFinancials();
+  const {
+    dailySpent,
+    activeDailyBudget,
+    criticalDailyLimit,
+    todayDynamicBudget,
+    vaultSweep,
+    ovsScore,
+    setTotalIncome,
+    setDailySpent,
+    setCustomDailyLimit,
+  } = useWealth();
+
+  const safeBudget = activeDailyBudget > 0 ? activeDailyBudget : 1;
+  const shieldPercentage =
+    activeDailyBudget > 0 ? Math.max(0, (safeBudget - dailySpent) / safeBudget) : 0;
+  const shieldRadius = 68;
+  const shieldCircumference = 2 * Math.PI * shieldRadius;
+  const shieldOffset = shieldCircumference - (shieldPercentage * shieldCircumference);
   const { width: screenWidth, height: screenHeight } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
@@ -258,12 +348,16 @@ export const HomeScreen: React.FC = () => {
     (CARD_ROW_WIDTH - CARD_SIZE * 2 - CARD_CENTER_GAP) / 2,
   );
   const scrollY = useRef(new Animated.Value(0)).current;
+  const scrollYValueRef = useRef(0);
   /** Let expanded activity tabs receive touches only when sheet is scrolled up (opacity > 0). */
   const [sheetExpandedForInput, setSheetExpandedForInput] = useState(false);
 
   const [activeTab, setActiveTab] = useState<TabKey>('Daily');
   const [activeNav, setActiveNav] = useState<NavKey>('home');
   const [activeRootTab, setActiveRootTab] = useState<'Home' | 'More' | 'IncomeEngine'>('Home');
+  const [incomeActivity, setIncomeActivity] = useState<IncomeSourceLog[]>([]);
+  const [expenseActivity, setExpenseActivity] = useState<Expense[]>([]);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [coinAnims, setCoinAnims] = useState<CoinAnim[]>([]);
   const coinAnimIdRef = useRef(0);
   const rootRef = useRef<View>(null);
@@ -277,14 +371,9 @@ export const HomeScreen: React.FC = () => {
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   const [isRecurring, setIsRecurring] = useState(false);
 
-  const [dailySpent] = useState(200);
-  const [dailyLimit, setDailyLimit] = useState(459);
-
-  const criticalBudgetLimit = Math.max(
-    Math.round(dailyLimit * 2.67),
-    dailyLimit + 100,
-    500,
-  );
+  const dailyLimit = activeDailyBudget;
+  const dynamicDailyMax = todayDynamicBudget;
+  const criticalDailyFloor = criticalDailyLimit;
 
   /** ~20% of screen — scales all scroll-linked transitions (replaces fixed 80–120px band). */
   const sa = scrollAnimSpanPx(screenHeight);
@@ -293,6 +382,7 @@ export const HomeScreen: React.FC = () => {
   useEffect(() => {
     const thr = 72 * sk;
     const id = scrollY.addListener(({ value }) => {
+      scrollYValueRef.current = value;
       const next = value > thr;
       setSheetExpandedForInput(prev => (prev === next ? prev : next));
     });
@@ -339,14 +429,15 @@ export const HomeScreen: React.FC = () => {
 
   const cardSize = Math.round(CARD_SIZE);
   const arcSize  = Math.round(cardSize * 0.3);
+  const dailyBudgetProgress = dailyLimit > 0 ? dailySpent / dailyLimit : 0;
 
   /** Expanded: pull ledger up under absolute filters (layout phantom from faded grid). Not animated. */
   const txListOverlapExpanded = Math.round(cardSize + SHEET_SECTION_GAP * 2 + 28);
   /** Expanded-only inset so first transactions start below sticky tabs instead of hiding under them. */
-  const txListExpandedTopInset = Math.round(EXPANDED_ACTIVITY_TOP + 132);
+  const txListExpandedTopInset = Math.round(EXPANDED_ACTIVITY_TOP + 196);
 
   const METRICS = [
-    { icon: '🛡️', label: 'Shield', value: `${fmt(dailySpent)} / ${fmt(dailyLimit)}`,          color: SHIELD_RED  },
+    { icon: '🛡️', label: 'Shield', value: `₹${dailySpent.toFixed(0)} / ${activeDailyBudget.toFixed(0)}`, color: SHIELD_RED  },
     { icon: '🎯', label: 'Track',  value: fmt(Math.max(0, summary.income - summary.expenses)), color: BUILD_GREEN },
     { icon: '📈', label: 'Build',  value: fmt(Math.max(0, summary.savings ?? 0)),               color: '#3182CE'   },
   ];
@@ -354,15 +445,114 @@ export const HomeScreen: React.FC = () => {
   const windowHeight = Dimensions.get('window').height;
   /** Pull white sheet up by 10% while keeping navy header unchanged. */
   const scrollTransparentSpacerHeight = HEADER_HEIGHT * 0.9;
-  const transactions = DUMMY_TRANSACTIONS;
+  const transactions = useMemo<Tx[]>(() => {
+    const incomeTx: Tx[] = incomeActivity.map(item => {
+      const created = item.createdAt ? new Date(item.createdAt) : null;
+      const sub = created
+        ? `${created.toLocaleDateString('en-IN', {
+            day: '2-digit',
+            month: 'short',
+          })} · ${created.toLocaleTimeString('en-IN', {
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: true,
+          })}`
+        : item.date;
+
+      return {
+        id: `income-${item.id}`,
+        emoji: '💰',
+        iconBg: '#E8F8F0',
+        name: item.title,
+        sub,
+        amount: Number(item.amount.replace(/,/g, '')) || 0,
+        positive: true,
+        ts: created ? created.getTime() : 0,
+      };
+    });
+
+    const expenseTx: Tx[] = expenseActivity.map(exp => {
+      const meta = EXPENSE_UI_MAP[exp.category] ?? EXPENSE_UI_MAP.other;
+      const at = new Date(exp.date);
+      return {
+        id: `expense-${exp.id}`,
+        emoji: meta.emoji,
+        iconBg: meta.iconBg,
+        name: exp.note?.trim() ? exp.note : meta.label,
+        sub: `${at.toLocaleDateString('en-IN', {
+          day: '2-digit',
+          month: 'short',
+        })} · ${at.toLocaleTimeString('en-IN', {
+          hour: '2-digit',
+          minute: '2-digit',
+          hour12: true,
+        })}`,
+        amount: exp.amount,
+        positive: false,
+        ts: at.getTime(),
+      };
+    });
+
+    return [...incomeTx, ...expenseTx].sort((a, b) => b.ts - a.ts);
+  }, [expenseActivity, incomeActivity]);
 
   useEffect(() => {
     if (!isExpenseModalVisible) return;
     setExpenseAmount('0');
     setExpenseNote('');
-    setSelectedCategory(null);
+    setSelectedCategory('food');
     setIsRecurring(false);
   }, [isExpenseModalVisible]);
+
+  useEffect(() => {
+    if (activeRootTab !== 'Home') return;
+    AsyncStorage.getItem('income_engine_sources_v1')
+      .then(raw => {
+        if (!raw) {
+          setIncomeActivity([]);
+          return;
+        }
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          setIncomeActivity(parsed as IncomeSourceLog[]);
+        } else {
+          setIncomeActivity([]);
+        }
+      })
+      .catch(() => {
+        setIncomeActivity([]);
+      });
+
+    AsyncStorage.getItem(EXPENSE_LOG_KEY)
+      .then(raw => {
+        if (!raw) {
+          setExpenseActivity([]);
+          return;
+        }
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          setExpenseActivity(parsed as Expense[]);
+        } else {
+          setExpenseActivity([]);
+        }
+      })
+      .catch(() => {
+        setExpenseActivity([]);
+      });
+  }, [activeRootTab]);
+
+  useEffect(() => {
+    if (activeRootTab !== 'Home' || isExpenseModalVisible) return;
+    AsyncStorage.getItem(EXPENSE_LOG_KEY)
+      .then(raw => {
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          setExpenseActivity(parsed as Expense[]);
+        }
+      })
+      .catch(() => {});
+  }, [activeRootTab, isExpenseModalVisible]);
 
   const handleKeypadPress = useCallback((val: string) => {
     if (val === '<') {
@@ -505,16 +695,58 @@ export const HomeScreen: React.FC = () => {
     ) {
       return;
     }
-    const expenseCategory = MODAL_TAG_TO_EXPENSE[selectedCategory];
+    const expenseCategory = MODAL_TAG_TO_EXPENSE[selectedCategory] ?? 'food';
     if (!expenseCategory) return;
-    await addExpense(
-      expenseCategory,
-      amt,
-      expenseNote.trim() || undefined,
-      isRecurring ? true : undefined,
-    );
+    try {
+      await addExpense(
+        expenseCategory,
+        amt,
+        expenseNote.trim() || undefined,
+        isRecurring ? true : undefined,
+      );
+    } catch {
+      const fallbackExpense: Expense = {
+        id: `${Date.now()}`,
+        category: expenseCategory,
+        amount: amt,
+        note: expenseNote.trim() || undefined,
+        date: new Date().toISOString(),
+        is_fixed: isRecurring ? true : undefined,
+      };
+      setExpenseActivity(prev => [fallbackExpense, ...prev]);
+      AsyncStorage.setItem(EXPENSE_LOG_KEY, JSON.stringify([fallbackExpense, ...expenseActivity])).catch(() => {});
+    }
+    setDailySpent(prev => prev + amt);
     setIsExpenseModalVisible(false);
-  }, [addExpense, expenseAmount, expenseNote, isRecurring, selectedCategory]);
+  }, [addExpense, expenseAmount, expenseNote, isRecurring, selectedCategory, setDailySpent]);
+
+  const handleRefreshReset = useCallback(async () => {
+    setIsRefreshing(true);
+    try {
+      await AsyncStorage.multiRemove([INCOME_SOURCES_KEY, EXPENSE_LOG_KEY]);
+      setIncomeActivity([]);
+      setExpenseActivity([]);
+      setTotalIncome(74000);
+      setDailySpent(0);
+      setCustomDailyLimit(null);
+    } finally {
+      setIsRefreshing(false);
+    }
+  }, [setCustomDailyLimit, setDailySpent, setTotalIncome]);
+
+  const headerRefreshPan = useMemo(
+    () =>
+      PanResponder.create({
+        onMoveShouldSetPanResponder: (_, g) =>
+          g.dy > 16 && Math.abs(g.dy) > Math.abs(g.dx) && scrollYValueRef.current <= 2,
+        onPanResponderRelease: (_, g) => {
+          if (g.dy > 86 && !isRefreshing) {
+            handleRefreshReset();
+          }
+        },
+      }),
+    [handleRefreshReset, isRefreshing],
+  );
 
   const sheetBottomPad = Platform.OS === 'ios' ? 34 : 20;
   const catCols = 4;
@@ -639,6 +871,7 @@ export const HomeScreen: React.FC = () => {
           paddingHorizontal: 24,
           backgroundColor: '#0A0E17',
         }}
+        {...headerRefreshPan.panHandlers}
       >
         <Animated.View
           pointerEvents="none"
@@ -689,7 +922,9 @@ export const HomeScreen: React.FC = () => {
                 shieldPct={summary.shieldPct}
                 trackPct={summary.trackPct}
                 buildPct={summary.buildPct}
-                score={summary.wealthScore}
+                score={ovsScore}
+                shieldCircumference={shieldCircumference}
+                shieldOffset={shieldOffset}
               />
             </View>
             <View style={s.metricStack}>
@@ -727,8 +962,8 @@ export const HomeScreen: React.FC = () => {
       />
 
       <Animated.ScrollView
-        bounces={false}
-        overScrollMode="never"
+        bounces
+        overScrollMode="always"
         showsVerticalScrollIndicator={false}
         stickyHeaderIndices={[1]}
         style={{ flex: 1, zIndex: 10 }}
@@ -738,7 +973,10 @@ export const HomeScreen: React.FC = () => {
           [{ nativeEvent: { contentOffset: { y: scrollY } } }],
           { useNativeDriver: false },
         )}
-        alwaysBounceVertical={false}
+        alwaysBounceVertical
+        refreshControl={
+          <RefreshControl refreshing={isRefreshing} onRefresh={handleRefreshReset} />
+        }
       >
         {/* INDEX 0: invisible spacer — exact 40% navy header height */}
         <View style={[s.scrollTopSpacer, { height: scrollTransparentSpacerHeight }]} />
@@ -807,7 +1045,7 @@ export const HomeScreen: React.FC = () => {
                         adjustsFontSizeToFit
                         minimumFontScale={0.6}
                       >
-                        ₹300
+                        ₹{vaultSweep.toFixed(0)}
                       </Text>
                       <Text style={s.vaultSub}>UNSPENT</Text>
                     </View>
@@ -820,9 +1058,11 @@ export const HomeScreen: React.FC = () => {
                   leftOffset={CARD_ROW_SIDE_MARGIN}
                   dailySpent={dailySpent}
                   dailyLimit={dailyLimit}
-                  setDailyLimit={setDailyLimit}
-                  criticalLimit={criticalBudgetLimit}
-                  arcSlot={<BudgetArc size={arcSize} />}
+                  setDailyLimit={setCustomDailyLimit}
+                  criticalLimit={criticalDailyFloor}
+                  sliderMin={0}
+                  sliderMax={dynamicDailyMax}
+                  arcSlot={<BudgetArc size={arcSize} progress={dailyBudgetProgress} />}
                 />
               </View>
             </Animated.View>
@@ -859,7 +1099,7 @@ export const HomeScreen: React.FC = () => {
                       adjustsFontSizeToFit
                       minimumFontScale={0.6}
                     >
-                      ₹300
+                      ₹{vaultSweep.toFixed(0)}
                     </Text>
                   </View>
                 </View>
@@ -913,20 +1153,27 @@ export const HomeScreen: React.FC = () => {
             sheetExpandedForInput && { marginTop: -txListOverlapExpanded, paddingTop: txListExpandedTopInset },
           ]}
         >
-          {transactions.map((tx, i) => (
-            <View key={tx.id} style={[s.txRow, i < transactions.length - 1 && s.txDivider]}>
-              <View style={[s.txIcon, { backgroundColor: tx.iconBg }]}>
-                <Text style={s.txEmoji}>{tx.emoji}</Text>
+          {transactions.length ? (
+            transactions.map((tx, i) => (
+              <View key={tx.id} style={[s.txRow, i < transactions.length - 1 && s.txDivider]}>
+                <View style={[s.txIcon, { backgroundColor: tx.iconBg }]}>
+                  <Text style={s.txEmoji}>{tx.emoji}</Text>
+                </View>
+                <View style={s.txInfo}>
+                  <Text style={s.txName}>{tx.name}</Text>
+                  <Text style={s.txSub}>{tx.sub}</Text>
+                </View>
+                <Text style={[s.txAmt, { color: tx.positive ? '#16A34A' : TEXT_PRIMARY }]}>
+                  {tx.positive ? '+' : '-'}₹{tx.amount.toLocaleString('en-IN')}
+                </Text>
               </View>
-              <View style={s.txInfo}>
-                <Text style={s.txName}>{tx.name}</Text>
-                <Text style={s.txSub}>{tx.sub}</Text>
-              </View>
-              <Text style={[s.txAmt, { color: tx.positive ? '#16A34A' : TEXT_PRIMARY }]}>
-                {tx.positive ? '+' : '-'}₹{tx.amount.toLocaleString('en-IN')}
-              </Text>
+            ))
+          ) : (
+            <View style={s.emptyActivityWrap}>
+              <Text style={s.emptyActivityTitle}>No recent activity yet</Text>
+              <Text style={s.emptyActivitySub}>Add an income source to see live entries here.</Text>
             </View>
-          ))}
+          )}
         </Animated.View>
       </Animated.ScrollView>
 
@@ -1077,7 +1324,12 @@ const s = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
     gap: 42, paddingHorizontal: 16,
   },
-  metricStack: { height: HERO_S, justifyContent: 'center', alignSelf: 'center', marginLeft: HERO_RING_DATA_GAP },
+  metricStack: {
+    height: HERO_S,
+    justifyContent: 'center',
+    alignSelf: 'center',
+    marginLeft: HERO_RING_DATA_GAP,
+  },
 
   // Insight pill — pinned at base of navy section
   insightPill: {
@@ -1476,6 +1728,21 @@ const s = StyleSheet.create({
   txName:    { fontSize: 14, fontWeight: '700', color: TEXT_PRIMARY },
   txSub:     { fontSize: 11, color: TEXT_MUTED, fontWeight: '500' },
   txAmt:     { fontSize: 14, fontWeight: '800', letterSpacing: -0.3, fontFamily: FONT_MONO as string },
+  emptyActivityWrap: {
+    paddingVertical: 24,
+    alignItems: 'center',
+  },
+  emptyActivityTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: TEXT_PRIMARY,
+  },
+  emptyActivitySub: {
+    marginTop: 6,
+    fontSize: 12,
+    fontWeight: '500',
+    color: TEXT_MUTED,
+  },
   txListShell: {
     backgroundColor: '#FFFFFF',
     paddingHorizontal: WHITE_PAD,
