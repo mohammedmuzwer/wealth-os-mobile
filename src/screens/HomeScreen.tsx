@@ -13,6 +13,7 @@ import {
   StatusBar, TouchableOpacity, Animated, useWindowDimensions, Dimensions,
   Modal, Pressable, TextInput, Switch, Platform, PanResponder, RefreshControl,
 } from 'react-native';
+import { MaterialIcons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -273,10 +274,14 @@ const BudgetArc: React.FC<{ size: number; progress: number }> = ({ size, progres
 
 // ─── Nav Item ─────────────────────────────────────────────────────────────────
 
-const NavItem: React.FC<{ icon: string; label: string; active: boolean; onPress: () => void }> =
+const NavItem: React.FC<{ icon: keyof typeof MaterialIcons.glyphMap; label: string; active: boolean; onPress: () => void }> =
   ({ icon, label, active, onPress }) => (
-    <TouchableOpacity style={s.navItem} onPress={onPress} activeOpacity={0.7}>
-      <Text style={[s.navIcon, active && s.navIconActive]}>{icon}</Text>
+    <TouchableOpacity
+      style={[s.navItem, active && s.navItemActiveGlass]}
+      onPress={onPress}
+      activeOpacity={0.7}
+    >
+      <MaterialIcons name={icon} size={20} style={[s.navIcon, active && s.navIconActive]} />
       <Text style={[s.navLabel, active && s.navLabelActive]}>{label}</Text>
     </TouchableOpacity>
   );
@@ -284,7 +289,7 @@ const NavItem: React.FC<{ icon: string; label: string; active: boolean; onPress:
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type TabKey = 'Daily' | 'Weekly' | 'Monthly';
-type NavKey  = 'home' | 'spend' | 'invest' | 'more';
+type NavKey  = 'home' | 'spend' | 'wealth' | 'incomeEngine' | 'more';
 type CoinAnim = {
   id: number;
   x: Animated.Value;
@@ -294,13 +299,20 @@ type CoinAnim = {
 };
 
 type IncomeSourceLog = {
-  id: number;
+  id: number | string;
   title: string;
   date: string;
-  amount: string;
+  amount: string | number;
   type: 'RECURRING' | 'MANUAL';
   icon: 'briefcase' | 'palette' | 'home' | 'bank';
   createdAt?: string;
+};
+
+const parseIncomeAmount = (amount: string | number): number => {
+  if (typeof amount === 'number') {
+    return Number.isFinite(amount) ? amount : 0;
+  }
+  return Number(amount.replace(/,/g, '').trim()) || 0;
 };
 
 const EXPENSE_LOG_KEY = 'wos_expense_log';
@@ -317,7 +329,7 @@ const EXPENSE_UI_MAP: Record<ExpenseCategory, { emoji: string; iconBg: string; l
 // ─── HomeScreen ───────────────────────────────────────────────────────────────
 
 export const HomeScreen: React.FC = () => {
-  const { summary, addExpense }          = useFinancials();
+  const { summary, addExpense, updateFinancialInput } = useFinancials();
   const {
     dailySpent,
     activeDailyBudget,
@@ -443,8 +455,8 @@ export const HomeScreen: React.FC = () => {
   ];
 
   const windowHeight = Dimensions.get('window').height;
-  /** Pull white sheet up by 10% while keeping navy header unchanged. */
-  const scrollTransparentSpacerHeight = HEADER_HEIGHT * 0.9;
+  /** Keep white sheet start exactly below navy header. */
+  const scrollTransparentSpacerHeight = HEADER_HEIGHT;
   const transactions = useMemo<Tx[]>(() => {
     const incomeTx: Tx[] = incomeActivity.map(item => {
       const created = item.createdAt ? new Date(item.createdAt) : null;
@@ -465,7 +477,7 @@ export const HomeScreen: React.FC = () => {
         iconBg: '#E8F8F0',
         name: item.title,
         sub,
-        amount: Number(item.amount.replace(/,/g, '')) || 0,
+        amount: parseIncomeAmount(item.amount),
         positive: true,
         ts: created ? created.getTime() : 0,
       };
@@ -496,6 +508,16 @@ export const HomeScreen: React.FC = () => {
     return [...incomeTx, ...expenseTx].sort((a, b) => b.ts - a.ts);
   }, [expenseActivity, incomeActivity]);
 
+  const applyIncomeLinkedState = useCallback(
+    (logs: IncomeSourceLog[]) => {
+      const paidIncomeTotal = logs.reduce((sum, item) => sum + parseIncomeAmount(item.amount), 0);
+      const nextIncome = paidIncomeTotal > 0 ? paidIncomeTotal : 0;
+      setTotalIncome(nextIncome);
+      updateFinancialInput({ income: nextIncome }).catch(() => {});
+    },
+    [setTotalIncome, updateFinancialInput],
+  );
+
   useEffect(() => {
     if (!isExpenseModalVisible) return;
     setExpenseAmount('0');
@@ -510,17 +532,22 @@ export const HomeScreen: React.FC = () => {
       .then(raw => {
         if (!raw) {
           setIncomeActivity([]);
+          applyIncomeLinkedState([]);
           return;
         }
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed)) {
-          setIncomeActivity(parsed as IncomeSourceLog[]);
+          const logs = parsed as IncomeSourceLog[];
+          setIncomeActivity(logs);
+          applyIncomeLinkedState(logs);
         } else {
           setIncomeActivity([]);
+          applyIncomeLinkedState([]);
         }
       })
       .catch(() => {
         setIncomeActivity([]);
+        applyIncomeLinkedState([]);
       });
 
     AsyncStorage.getItem(EXPENSE_LOG_KEY)
@@ -539,7 +566,7 @@ export const HomeScreen: React.FC = () => {
       .catch(() => {
         setExpenseActivity([]);
       });
-  }, [activeRootTab]);
+  }, [activeRootTab, applyIncomeLinkedState]);
 
   useEffect(() => {
     if (activeRootTab !== 'Home' || isExpenseModalVisible) return;
@@ -726,13 +753,14 @@ export const HomeScreen: React.FC = () => {
       await AsyncStorage.multiRemove([INCOME_SOURCES_KEY, EXPENSE_LOG_KEY]);
       setIncomeActivity([]);
       setExpenseActivity([]);
-      setTotalIncome(74000);
+      setTotalIncome(0);
+      await updateFinancialInput({ income: 0 });
       setDailySpent(0);
       setCustomDailyLimit(null);
     } finally {
       setIsRefreshing(false);
     }
-  }, [setCustomDailyLimit, setDailySpent, setTotalIncome]);
+  }, [setCustomDailyLimit, setDailySpent, setTotalIncome, updateFinancialInput]);
 
   const headerRefreshPan = useMemo(
     () =>
@@ -903,9 +931,11 @@ export const HomeScreen: React.FC = () => {
         <View
           style={{
             flex: 1,
-            justifyContent: 'center',
+            justifyContent: 'flex-end',
             alignItems: 'center',
-            paddingTop: 32,
+            paddingTop: 0,
+            paddingBottom: 0,
+            transform: [{ translateY: HEADER_HEIGHT * 0.12 }],
           }}
         >
           {/* THE RINGS */}
@@ -915,6 +945,10 @@ export const HomeScreen: React.FC = () => {
               justifyContent: 'center',
               alignItems: 'center',
               width: '100%',
+              transform: [
+                { translateX: SCREEN_WIDTH * 0.05 },
+                { translateY: -HEADER_HEIGHT * 0.05 },
+              ],
             }}
           >
             <View ref={heroRingsRef} collapsable={false}>
@@ -935,7 +969,7 @@ export const HomeScreen: React.FC = () => {
           </View>
 
           {/* THE AI INSIGHT PILL */}
-          <View style={{ alignSelf: 'center', marginTop: 18 }}>
+          <View style={{ alignSelf: 'center', marginTop: 12 }}>
             <TouchableOpacity style={s.insightPill} activeOpacity={0.75}>
               <Text style={s.insightSpark}>✦</Text>
               <Text style={s.insightText} numberOfLines={1}>
@@ -1212,7 +1246,14 @@ export const HomeScreen: React.FC = () => {
             backgroundColor: '#0A0E17',
           }}
         >
-          <MoreScreen onIncomeEnginePress={() => setActiveRootTab('IncomeEngine')} />
+          <MoreScreen
+            onIncomeEnginePress={() => setActiveRootTab('IncomeEngine')}
+            onLoanPress={() => setActiveRootTab('Home')}
+            onBack={() => {
+              setActiveNav('home');
+              setActiveRootTab('Home');
+            }}
+          />
         </View>
       )}
 
@@ -1228,25 +1269,32 @@ export const HomeScreen: React.FC = () => {
             backgroundColor: '#0A0E17',
           }}
         >
-          <IncomeEngineScreen />
+          <IncomeEngineScreen onBack={() => setActiveRootTab('More')} />
         </View>
       )}
 
+      <View
+        pointerEvents="none"
+        style={[s.bottomSafeAreaFill, { height: Math.max(insets.bottom, 8) + 6 }]}
+      />
+
       {/* ── TAB BAR ───────────────────────────────────────────────────────── */}
       <Animated.View style={[s.floatingFooter, { transform: [{ translateY: footerTranslateY }] }]} pointerEvents="box-none">
-      <View style={s.tabBar}>
-        <NavItem icon="⌂"  label="Home"   active={activeNav === 'home'}   onPress={() => { setActiveNav('home'); setActiveRootTab('Home'); }}   />
-        <NavItem icon="💳" label="Spend"  active={activeNav === 'spend'}  onPress={() => { setActiveNav('spend'); setActiveRootTab('Home'); }}  />
-        <View style={s.fabSlot} />
-        <NavItem icon="📊" label="Invest" active={activeNav === 'invest'} onPress={() => { setActiveNav('invest'); setActiveRootTab('Home'); }} />
-        <NavItem icon="⋯"  label="More"   active={activeNav === 'more'}   onPress={() => { setActiveNav('more'); setActiveRootTab('More'); }}   />
+        <View style={s.tabBar}>
+          <NavItem icon="home" label="Home" active={activeNav === 'home'} onPress={() => { setActiveNav('home'); setActiveRootTab('Home'); }} />
+          <NavItem icon="credit-card" label="Spend" active={activeNav === 'spend'} onPress={() => { setActiveNav('spend'); setActiveRootTab('Home'); }} />
+          <NavItem icon="account-balance-wallet" label="Wealth" active={activeNav === 'wealth'} onPress={() => { setActiveNav('wealth'); setActiveRootTab('Home'); }} />
+          <NavItem icon="savings" label="IE" active={activeNav === 'incomeEngine'} onPress={() => { setActiveNav('incomeEngine'); setActiveRootTab('IncomeEngine'); }} />
+          <NavItem icon="more-horiz" label="More" active={activeNav === 'more'} onPress={() => { setActiveNav('more'); setActiveRootTab('More'); }} />
 
-        <View style={s.fabAbsWrap} pointerEvents="box-none">
-          <TouchableOpacity style={s.fab} onPress={() => setIsExpenseModalVisible(true)} activeOpacity={0.85}>
-            <Text style={s.fabIcon}>+</Text>
-          </TouchableOpacity>
+          {activeRootTab !== 'IncomeEngine' ? (
+            <View style={s.fabAbsWrap} pointerEvents="box-none">
+              <TouchableOpacity style={s.fab} onPress={() => setIsExpenseModalVisible(true)} activeOpacity={0.85}>
+                <Text style={s.fabIcon}>+</Text>
+              </TouchableOpacity>
+            </View>
+          ) : null}
         </View>
-      </View>
       </Animated.View>
 
       <Modal
@@ -1761,34 +1809,65 @@ const s = StyleSheet.create({
     zIndex: 999,
     elevation: 50,
   },
-  tabBar: {
-    position: 'absolute', bottom: 0, left: 0, right: 0,
-    flexDirection: 'row', alignItems: 'flex-end',
-    backgroundColor: NAVY,
-    borderTopLeftRadius: 32, borderTopRightRadius: 32,
-    paddingHorizontal: 8, paddingTop: 10, paddingBottom: 16,
-    shadowColor: '#000', shadowOffset: { width: 0, height: -6 },
-    shadowOpacity: 0.25, shadowRadius: 16, elevation: 20,
+  bottomSafeAreaFill: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: '#FFFFFF',
+    zIndex: 920,
   },
-  navItem:        { flex: 1, alignItems: 'center', gap: 4, paddingBottom: 2 },
-  navIcon:        { fontSize: 26, color: 'rgba(255,255,255,0.35)' },
-  navIconActive:  { color: PURPLE },
-  navLabel:       { fontSize: 11, color: 'rgba(255,255,255,0.40)', fontWeight: '600', letterSpacing: 0.2 },
-  navLabelActive: { color: PURPLE, fontWeight: '800' },
-
-  fabSlot: { flex: 1 },
+  tabBar: {
+    position: 'absolute',
+    bottom: 22,
+    left: 14,
+    right: 14,
+    minHeight: 64,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.68)',
+    borderRadius: 34,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.9)',
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 16,
+    elevation: 12,
+  },
+  navItem:        { flex: 1, alignItems: 'center', gap: 2, paddingBottom: 0, borderRadius: 18, paddingVertical: 5 },
+  navItemActiveGlass: {
+    backgroundColor: 'rgba(255,255,255,0.84)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.98)',
+    shadowColor: '#94A3B8',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.28,
+    shadowRadius: 6,
+    elevation: 2,
+  },
+  navIcon:        { color: '#1F2937' },
+  navIconActive:  { color: '#1E88FF' },
+  navLabel:       { fontSize: 10, color: '#4B5563', fontWeight: '600', letterSpacing: 0.1 },
+  navLabelActive: { color: '#1E88FF', fontWeight: '800' },
 
   fabAbsWrap: {
-    position: 'absolute', left: 0, right: 0, top: -32,
-    alignItems: 'center',
+    position: 'absolute',
+    right: 8,
+    top: -61,
+    alignItems: 'flex-end',
   },
   fab: {
-    width: 64, height: 64, borderRadius: 32,
-    backgroundColor: PURPLE, alignItems: 'center', justifyContent: 'center',
-    shadowColor: PURPLE, shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.6, shadowRadius: 18, elevation: 16,
+    width: 50, height: 50, borderRadius: 25,
+    backgroundColor: '#1E88FF', alignItems: 'center', justifyContent: 'center',
+    borderWidth: 3,
+    borderColor: '#FFFFFF',
+    shadowColor: '#1E88FF', shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.45, shadowRadius: 16, elevation: 16,
   },
-  fabIcon: { fontSize: 34, color: '#FFFFFF', fontWeight: '300', lineHeight: 38, marginTop: -2 },
+  fabIcon: { fontSize: 28, color: '#FFFFFF', fontWeight: '400', lineHeight: 32, marginTop: -1 },
 
   coinOverlay: {
     ...StyleSheet.absoluteFillObject,

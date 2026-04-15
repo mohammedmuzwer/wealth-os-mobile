@@ -37,7 +37,7 @@ const FINANCIALS_KEY  = 'wos_financials';
 // ─── Default financial baseline ───────────────────────────────────────────────
 
 const DEFAULT_INPUT: FinancialInput = {
-  income:      74_790,
+  income:      0,
   expenses:    60_000,
   savings:     0,
   investments: 1_465_000,

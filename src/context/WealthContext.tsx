@@ -26,7 +26,7 @@ const WealthContext = createContext<WealthContextValue | undefined>(undefined);
 const EXPENSE_LOG_KEY = 'wos_expense_log';
 
 export const WealthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [totalIncome, setTotalIncome] = useState(74000);
+  const [totalIncome, setTotalIncome] = useState(0);
   const [dailySpent, setDailySpent] = useState(0);
   const [daysInMonth] = useState(30);
   const [customDailyLimit, setCustomDailyLimit] = useState<number | null>(null);
