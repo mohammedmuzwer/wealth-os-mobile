@@ -1,0 +1,3 @@
+export const NAVY_SECTION_RATIO = 0.42;
+export const WHITE_SECTION_RATIO = 1 - NAVY_SECTION_RATIO;
+

@@ -1,10 +1,11 @@
-import React from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from 'react-native';
+import React, { useMemo, useRef } from 'react';
+import { Animated, View, Text, StyleSheet, ScrollView, TouchableOpacity, Dimensions, PanResponder } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import Svg, { Circle, G } from 'react-native-svg';
 import { useFinancials } from '../hooks/useFinancials';
 import { useWealth } from '../context/WealthContext';
-import { FONT_MONO, FONT_UI } from '../theme/tokens';
+import { AppPageHeader } from '../components/AppPageHeader';
+
+const MORE_NAVY_RATIO = 0.15;
 
 type GridItemProps = {
   icon: string;
@@ -26,101 +27,95 @@ const GridItem: React.FC<GridItemProps> = ({ icon, title, subtitle, color, onPre
   </TouchableOpacity>
 );
 
-type MiniRingsProps = {
-  shieldPct: number;
-  trackPct: number;
-  buildPct: number;
-};
-
-const MiniRings: React.FC<MiniRingsProps> = ({ shieldPct, trackPct, buildPct }) => {
-  const S = 38;
-  const cx = S / 2;
-  const cy = S / 2;
-  const sw = 4;
-  const rO = 16;
-  const rM = 12;
-  const rI = 8;
-
-  const renderArc = (r: number, color: string, progress: number) => {
-    const circ = 2 * Math.PI * r;
-    const p = Math.max(0, Math.min(progress, 1));
-    const offset = circ * (1 - p);
-    return (
-      <G rotation="-90" origin={`${cx},${cy}`}>
-        <Circle cx={cx} cy={cy} r={r} stroke={color} strokeWidth={sw} strokeOpacity={0.18} fill="none" />
-        <Circle
-          cx={cx}
-          cy={cy}
-          r={r}
-          stroke={color}
-          strokeWidth={sw}
-          strokeLinecap="round"
-          strokeDasharray={circ}
-          strokeDashoffset={offset}
-          fill="none"
-        />
-      </G>
-    );
-  };
-
-  return (
-    <View style={styles.miniRingsWrap}>
-      <Svg width={S} height={S} viewBox={`0 0 ${S} ${S}`}>
-        {renderArc(rO, '#FF3B30', shieldPct / 100)}
-        {renderArc(rM, '#34C759', trackPct / 100)}
-        {renderArc(rI, '#32ADE6', Math.min(buildPct, 100) / 100)}
-      </Svg>
-    </View>
-  );
-};
-
 type MoreScreenProps = {
   onIncomeEnginePress?: () => void;
   onLoanPress?: () => void;
   onBack?: () => void;
+  headerShieldPct?: number;
+  headerTrackPct?: number;
+  headerBuildPct?: number;
+  headerOvrScore?: number;
 };
 
-export const MoreScreen: React.FC<MoreScreenProps> = ({ onIncomeEnginePress, onLoanPress, onBack }) => {
+export const MoreScreen: React.FC<MoreScreenProps> = ({
+  onIncomeEnginePress,
+  onLoanPress,
+  onBack,
+  headerShieldPct,
+  headerTrackPct,
+  headerBuildPct,
+  headerOvrScore,
+}) => {
   const insets = useSafeAreaInsets();
   const { summary } = useFinancials();
-  const { shieldPercentage, ovsScore } = useWealth();
+  const { shieldPercentage, ovrScore } = useWealth();
+  const resolvedShieldPct = headerShieldPct ?? shieldPercentage;
+  const resolvedTrackPct = headerTrackPct ?? summary.trackPct;
+  const resolvedBuildPct = headerBuildPct ?? summary.buildPct;
+  const resolvedOvrScore = headerOvrScore ?? ovrScore;
+  const { height: screenHeight } = Dimensions.get('window');
+  const whiteTopSpacing = Math.round(screenHeight * 0.03);
+  const minimizedTop = Math.round(screenHeight * MORE_NAVY_RATIO);
+  const expandedTop = insets.top + 8;
+  const sheetTop = useRef(new Animated.Value(minimizedTop)).current;
+  const panStartTopRef = useRef(minimizedTop);
+
+  const panResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => false,
+        onMoveShouldSetPanResponder: (_, g) =>
+          Math.abs(g.dy) > Math.abs(g.dx) && Math.abs(g.dy) > 3,
+        onMoveShouldSetPanResponderCapture: (_, g) =>
+          Math.abs(g.dy) > Math.abs(g.dx) && Math.abs(g.dy) > 2,
+        onPanResponderGrant: () => {
+          sheetTop.stopAnimation((value: number) => {
+            panStartTopRef.current = value;
+          });
+        },
+        onPanResponderMove: (_, g) => {
+          const next = panStartTopRef.current + g.dy;
+          const clamped = Math.max(expandedTop, Math.min(minimizedTop, next));
+          sheetTop.setValue(clamped);
+        },
+        onPanResponderRelease: (_, g) => {
+          sheetTop.stopAnimation((value: number) => {
+            const shouldExpand = g.vy < -0.25 || value < expandedTop + (minimizedTop - expandedTop) * 0.68;
+            Animated.timing(sheetTop, {
+              toValue: shouldExpand ? expandedTop : minimizedTop,
+              duration: 220,
+              useNativeDriver: false,
+            }).start();
+          });
+        },
+      }),
+    [expandedTop, minimizedTop, sheetTop],
+  );
 
   return (
     <View style={styles.container}>
-      <View style={[styles.topSectionWhite, { paddingTop: insets.top + 10 }]}>
+      <View style={[styles.topSectionWhite, { paddingTop: insets.top }]}>
         <View style={styles.topSectionInner}>
-          <View style={styles.headerRow}>
-            <TouchableOpacity style={styles.backCircleBtn} activeOpacity={0.85} onPress={onBack}>
-              <Text style={styles.backCircleArrow}>‹</Text>
-            </TouchableOpacity>
-            <View style={styles.headerIconsRow}>
-              <View style={styles.osPill}>
-                <Text style={styles.osPillText}>OVS</Text>
-                <Text style={styles.osPillScore}>{ovsScore}</Text>
-              </View>
-              <MiniRings
-                shieldPct={shieldPercentage}
-                trackPct={summary.trackPct}
-                buildPct={summary.buildPct}
-              />
-              <View style={styles.bellWrap}>
-                <Text style={styles.bellIcon}>🔔</Text>
-                <View style={styles.bellDot} />
-              </View>
-            </View>
-          </View>
-
-          <View style={styles.headerTitleRow}>
-            <Text style={styles.headerTitle}>More</Text>
-          </View>
+          <AppPageHeader
+            title="More"
+            onBack={onBack}
+            ovrScore={resolvedOvrScore}
+            shieldPct={resolvedShieldPct}
+            trackPct={resolvedTrackPct}
+            buildPct={resolvedBuildPct}
+          />
         </View>
       </View>
 
-      <ScrollView
-        showsVerticalScrollIndicator={false}
-        contentContainerStyle={styles.scrollContent}
-      >
-        <View style={styles.gridWrap}>
+      <Animated.View style={[styles.sheet, { top: sheetTop }]} {...panResponder.panHandlers}>
+        <View style={styles.sheetHandleWrap} {...panResponder.panHandlers}>
+          <View style={styles.sheetHandle} />
+        </View>
+        <ScrollView
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={[styles.scrollContent, { paddingTop: whiteTopSpacing }]}
+        >
+          <View style={styles.gridWrap}>
             <GridItem
               icon="💳"
               title="My Accounts"
@@ -161,7 +156,8 @@ export const MoreScreen: React.FC<MoreScreenProps> = ({ onIncomeEnginePress, onL
               }}
             />
           </View>
-      </ScrollView>
+        </ScrollView>
+      </Animated.View>
     </View>
   );
 };
@@ -169,88 +165,47 @@ export const MoreScreen: React.FC<MoreScreenProps> = ({ onIncomeEnginePress, onL
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#FFFFFF',
+    backgroundColor: '#0A0E17',
   },
   topSectionWhite: {
-    backgroundColor: '#FFFFFF',
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: `${MORE_NAVY_RATIO * 100}%`,
+    backgroundColor: '#1A1A2E',
+    zIndex: 2,
   },
   topSectionInner: {
-    paddingHorizontal: 24,
-    paddingBottom: 14,
+    paddingHorizontal: 16,
+    paddingBottom: 16,
+  },
+  sheet: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: '#FFFFFF',
+    borderTopLeftRadius: 36,
+    borderTopRightRadius: 36,
+    overflow: 'hidden',
+    zIndex: 5,
+  },
+  sheetHandleWrap: {
+    alignItems: 'center',
+    paddingTop: 8,
+    paddingBottom: 4,
+  },
+  sheetHandle: {
+    width: 36,
+    height: 4,
+    borderRadius: 999,
+    backgroundColor: '#D8DAE4',
   },
   scrollContent: {
     backgroundColor: '#FFFFFF',
-    paddingTop: 6,
+    paddingTop: 14,
     paddingBottom: 120,
-  },
-  headerRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  backCircleBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: '#F3F4F6',
-    borderWidth: 1,
-    borderColor: '#E5E7EB',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  backCircleArrow: {
-    color: '#111827',
-    fontSize: 18,
-    lineHeight: 18,
-    textAlign: 'center',
-    includeFontPadding: false,
-  },
-  headerIconsRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  osPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: '#E9ECEF',
-    borderRadius: 999,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-  },
-  osPillText: { color: '#334155', fontSize: 10, fontWeight: '700', letterSpacing: 0.8, fontFamily: FONT_UI as string },
-  osPillScore: { color: '#0F172A', fontSize: 17, fontWeight: '800', letterSpacing: -0.4, fontFamily: FONT_MONO as string },
-  miniRingsWrap: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(255,255,255,0.12)',
-  },
-  bellWrap: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    backgroundColor: 'rgba(255,255,255,0.12)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  bellIcon: { fontSize: 18 },
-  bellDot: {
-    position: 'absolute',
-    top: -1,
-    right: -1,
-    width: 9,
-    height: 9,
-    borderRadius: 5,
-    backgroundColor: '#34C759',
-    borderWidth: 1.5,
-    borderColor: '#FFFFFF',
-  },
-  headerTitleRow: { marginTop: 24, alignItems: 'flex-start' },
-  headerTitle: {
-    fontSize: 20,
-    fontWeight: '800',
-    color: '#111827',
-    letterSpacing: -0.3,
   },
   gridWrap: {
     marginHorizontal: 20,
@@ -263,13 +218,18 @@ const styles = StyleSheet.create({
   gridCard: {
     width: '48%',
     minHeight: 112,
-    borderRadius: 0,
-    borderWidth: 0,
-    borderColor: 'transparent',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#EEF2FF',
     backgroundColor: '#FFFFFF',
     paddingHorizontal: 14,
     paddingVertical: 10,
     justifyContent: 'space-between',
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.06,
+    shadowRadius: 6,
+    elevation: 2,
   },
   menuIconWrap: {
     width: 36,

@@ -9,20 +9,25 @@
 
 import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import {
-  View, Text, StyleSheet, SafeAreaView,
-  StatusBar, TouchableOpacity, Animated, useWindowDimensions, Dimensions,
+  View, Text, StyleSheet,
+  StatusBar, TouchableOpacity, Animated, Easing, useWindowDimensions, Dimensions,
   Modal, Pressable, TextInput, Switch, Platform, PanResponder, RefreshControl,
+  AppState, type AppStateStatus,
 } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Circle, G } from 'react-native-svg';
 import { useFinancials } from '../hooks/useFinancials';
 import { useWealth } from '../context/WealthContext';
 import { DailyBudgetCard } from '../components/DailyBudgetCard';
+import { PocketSplitCard } from '../components/PocketSplitCard';
+import { NAVY_SECTION_RATIO } from '../constants/pageLayout';
 import { MoreScreen } from './MoreScreen';
 import { IncomeEngineScreen } from './IncomeEngineScreen';
+import { WealthScreen } from './WealthScreen';
+import { updateUserSettingsFirestoreRecord } from '../services/incomeHistorySync';
 import {
   SHIELD_RED, BUILD_GREEN, VAULT_GOLD, PURPLE, NAVY,
   TEXT_PRIMARY, TEXT_MUTED,
@@ -77,13 +82,13 @@ const TEAL         = '#22D3EE';
 const CYBER_YELLOW = '#FFD700';
 
 // ─── Layout constants ─────────────────────────────────────────────────────────
-const HERO_S    = 170;   // +5% from current size
-const HERO_STR  = 12;
+const HERO_S    = 170;
 const HERO_GAP  = 2;     // crisp visual ring gap
 const HERO_RING_DATA_GAP = Math.round(HERO_S * 0.2375);
 const CURVE     = 28;    // white section overlaps navy by this many px
 const WHITE_PAD = 20;
 const CARD_GAP  = 12;
+const HOME_CARD_SCALE = 0.98;
 
 
 /** Scroll distance (px) for expand/collapse animations ≈ 20% of screen height */
@@ -120,58 +125,90 @@ const DUMMY_TRANSACTIONS: Tx[] = [
   { id: '12', emoji: '🛒', iconBg: '#FEF3E8', name: 'DMart',           sub: 'Sat · Groceries',          amount: 2840, positive: false, ts: 0 },
 ];
 
-// ─── Animated Arc ─────────────────────────────────────────────────────────────
+// ─── Animated ring segments ───────────────────────────────────────────────────
 
 const AnimatedCircle = Animated.createAnimatedComponent(Circle);
-
-interface ArcProps { cx: number; cy: number; r: number; color: string; progress: number; sw?: number; }
-
-const Arc: React.FC<ArcProps> = ({ cx, cy, r, color, progress, sw = HERO_STR }) => {
-  const circ = 2 * Math.PI * r;
-  const anim = useRef(new Animated.Value(0)).current;
-  useEffect(() => {
-    Animated.timing(anim, { toValue: Math.min(progress, 1), duration: 1200, useNativeDriver: false }).start();
-  }, [progress]);
-  const offset = anim.interpolate({ inputRange: [0, 1], outputRange: [circ, 0] });
-  return (
-    <G rotation="-90" origin={`${cx},${cy}`}>
-      <Circle cx={cx} cy={cy} r={r} stroke={color} strokeWidth={sw} strokeOpacity={0.15} fill="none" />
-      <AnimatedCircle cx={cx} cy={cy} r={r} stroke={color} strokeWidth={sw}
-        strokeLinecap="round" strokeDasharray={circ} strokeDashoffset={offset} fill="none" />
-    </G>
-  );
-};
 
 // ─── Hero Rings ───────────────────────────────────────────────────────────────
 
 interface HeroRingsProps {
-  shieldPct: number;
-  trackPct: number;
-  buildPct: number;
+  buildPercentage: number;
   score: number;
   shieldCircumference: number;
   shieldOffset: number;
+  shieldColor: string;
+  trackCircumference: number;
+  trackOffset: number;
+  trackColor: string;
+  isLocked: boolean;
+  buildColor: string;
 }
 
 const HeroRings: React.FC<HeroRingsProps> = React.memo(({
-  shieldPct,
-  trackPct,
-  buildPct,
+  buildPercentage,
   score,
   shieldCircumference,
   shieldOffset,
+  shieldColor,
+  trackCircumference,
+  trackOffset,
+  trackColor,
+  isLocked,
+  buildColor,
 }) => {
   const S = HERO_S;
   const cx = S / 2;
   const cy = S / 2;
-  const ringStep = S * 0.1 * 0.95; // reduce inter-ring gap by 5%
-  const rO = S * 0.4;
-  const rM = rO - ringStep;
-  const rI = rM - ringStep;
+  const rO = 64;
+  const rM = 50;
+  const rI = 36;
   const tierColor = getTierColor(score);
   const tierLabel = getTierLabel(score);
   const pulse = useRef(new Animated.Value(1)).current;
+  const animatedShieldOffset = useRef(new Animated.Value(shieldOffset)).current;
+  const animatedTrackOffset = useRef(new Animated.Value(trackOffset)).current;
+  const buildCircumference = 2 * Math.PI * rI;
+  const initialBuildOffset = buildCircumference - Math.min(Math.max(buildPercentage, 0), 1) * buildCircumference;
+  const animatedBuildOffset = useRef(new Animated.Value(initialBuildOffset)).current;
+  const prevShieldOffset = useRef(shieldOffset);
+  const prevTrackOffset = useRef(trackOffset);
+  const prevBuildOffset = useRef(initialBuildOffset);
   const prev  = useRef(score);
+
+  useEffect(() => {
+    const isDrain = shieldOffset <= prevShieldOffset.current;
+    Animated.timing(animatedShieldOffset, {
+      toValue: shieldOffset,
+      duration: isDrain ? 150 : 220,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: false,
+    }).start();
+    prevShieldOffset.current = shieldOffset;
+  }, [animatedShieldOffset, shieldOffset]);
+
+  useEffect(() => {
+    const isDrain = trackOffset <= prevTrackOffset.current;
+    Animated.timing(animatedTrackOffset, {
+      toValue: trackOffset,
+      duration: isDrain ? 150 : 220,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: false,
+    }).start();
+    prevTrackOffset.current = trackOffset;
+  }, [animatedTrackOffset, trackOffset]);
+
+  useEffect(() => {
+    const nextBuildOffset = buildCircumference - Math.min(Math.max(buildPercentage, 0), 1) * buildCircumference;
+    const isDrain = nextBuildOffset <= prevBuildOffset.current;
+    Animated.timing(animatedBuildOffset, {
+      toValue: nextBuildOffset,
+      duration: isDrain ? 150 : 220,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: false,
+    }).start();
+    prevBuildOffset.current = nextBuildOffset;
+  }, [animatedBuildOffset, buildCircumference, buildPercentage]);
+
   useEffect(() => {
     if (prev.current !== score) {
       prev.current = score;
@@ -186,38 +223,68 @@ const HeroRings: React.FC<HeroRingsProps> = React.memo(({
       <Svg width={S} height={S} viewBox={`0 0 ${S} ${S}`}>
         {/* --- OUTER RING: RED SHIELD --- */}
         {/* 1. The Faded Background Track */}
-        <Circle
-          cx="85"
-          cy="85"
-          r="68"
-          stroke="#FF3B30"
-          strokeOpacity="0.2"
-          strokeWidth="12"
-          fill="none"
-        />
+        <Circle cx="85" cy="85" r="64" stroke="rgba(255,255,255,0.08)" strokeWidth="10" fill="none" />
 
         {/* 2. The Dynamic Progress Ring (With Crash Guards) */}
-        <Circle
+        <AnimatedCircle
           cx="85"
           cy="85"
-          r="68"
-          stroke="#FF3B30"
-          strokeWidth="12"
+          r={rO}
+          stroke={shieldColor}
+          strokeWidth="10"
           fill="none"
           strokeLinecap="round"
-          strokeDasharray={shieldCircumference || 427}
-          strokeDashoffset={isNaN(shieldOffset) ? 0 : shieldOffset}
+          strokeDasharray={shieldCircumference}
+          strokeDashoffset={animatedShieldOffset}
           rotation="-90"
           originX="85"
           originY="85"
         />
-        {/* -------------------------------- */}
-        <Arc cx={cx} cy={cy} r={rM} color="#34C759" progress={trackPct  / 100} />
-        <Arc cx={cx} cy={cy} r={rI} color="#32ADE6" progress={Math.min(buildPct, 100) / 100} />
+        {/* TRACK background */}
+        <Circle cx="85" cy="85" r="50" stroke="rgba(255,255,255,0.08)" strokeWidth="10" fill="none" />
+        {/* TRACK progress */}
+        <AnimatedCircle
+          cx="85"
+          cy="85"
+          r={rM}
+          stroke={trackColor}
+          strokeWidth="10"
+          fill="none"
+          strokeLinecap="round"
+          strokeDasharray={trackCircumference}
+          strokeDashoffset={isNaN(trackOffset) ? trackCircumference : animatedTrackOffset}
+          rotation="-90"
+          originX="85"
+          originY="85"
+        />
+        {/* BUILD background */}
+        <Circle cx="85" cy="85" r="36" stroke="rgba(255,255,255,0.08)" strokeWidth="10" fill="none" />
+        {/* BUILD progress */}
+        <AnimatedCircle
+          cx="85"
+          cy="85"
+          r={rI}
+          stroke={buildColor}
+          strokeWidth="10"
+          fill="none"
+          strokeLinecap="round"
+          strokeDasharray={buildCircumference}
+          strokeDashoffset={animatedBuildOffset}
+          rotation="-90"
+          originX="85"
+          originY="85"
+        />
       </Svg>
-      <View style={rg.centre} pointerEvents="none">
-        <Animated.Text style={[rg.score, { color: tierColor, transform: [{ scale: pulse }] }]}>{score}</Animated.Text>
-        <Text style={[rg.tier, { color: tierColor }]}>{tierLabel}</Text>
+      <View style={rg.centre}>
+        {isLocked ? (
+          <Text style={rg.lockIcon}>🔒</Text>
+        ) : (
+          <>
+            <Animated.Text style={[rg.score, { color: tierColor, transform: [{ scale: pulse }] }]}>{score}</Animated.Text>
+            <Text style={[rg.ovrLabel, { color: tierColor }]}>OVR</Text>
+            <Text style={[rg.tier, { color: tierColor }]}>{tierLabel}</Text>
+          </>
+        )}
       </View>
     </View>
   );
@@ -225,8 +292,10 @@ const HeroRings: React.FC<HeroRingsProps> = React.memo(({
 
 const rg = StyleSheet.create({
   centre: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' },
-  score:  { fontSize: 27, lineHeight: 29, fontWeight: '900', letterSpacing: -1, fontFamily: FONT_MONO as string },
-  tier:   { fontSize: 7, lineHeight: 9, fontWeight: '800', letterSpacing: 1.2, marginTop: 1 },
+  score:  { fontSize: 32, lineHeight: 34, fontWeight: '700', letterSpacing: -1, fontFamily: FONT_MONO as string },
+  ovrLabel: { fontSize: 10, lineHeight: 12, fontWeight: '700', letterSpacing: 1, marginTop: 1 },
+  tier:   { fontSize: 11, lineHeight: 14, fontWeight: '800', letterSpacing: 1, marginTop: 2 },
+  lockIcon: { fontSize: 28, lineHeight: 32 },
 });
 
 // ─── Metric Badge ─────────────────────────────────────────────────────────────
@@ -317,6 +386,100 @@ const parseIncomeAmount = (amount: string | number): number => {
 
 const EXPENSE_LOG_KEY = 'wos_expense_log';
 const INCOME_SOURCES_KEY = 'income_engine_sources_v1';
+const FIRESTORE_PROJECT_ID = process.env.EXPO_PUBLIC_FIREBASE_PROJECT_ID;
+const FIRESTORE_USER_ID = process.env.EXPO_PUBLIC_FIREBASE_USER_ID;
+
+type ShieldSettings = {
+  activeDailyBudget: number;
+  salaryConfirmed: boolean | null;
+  incomeConfirmedAt: Date | null;
+  dailySpent: number;
+};
+
+type TrackRingData = {
+  trackLevel: number;
+  activeMinutesToday: number;
+  entriesToday: number;
+  lastActiveDate: string;
+};
+
+type VaultSummary = {
+  pocketedToday: number;
+  totalPocketed: number;
+  lockTarget: number;
+  locked: boolean;
+  lastPocketDate: string;
+};
+
+const isSameDay = (date1: Date, date2: Date) =>
+  date1.getFullYear() === date2.getFullYear() &&
+  date1.getMonth() === date2.getMonth() &&
+  date1.getDate() === date2.getDate();
+
+const getFirestoreNumber = (field: any): number | null => {
+  if (!field || typeof field !== 'object') return null;
+  if (typeof field.integerValue === 'string') {
+    const value = Number(field.integerValue);
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof field.doubleValue === 'number') return Number.isFinite(field.doubleValue) ? field.doubleValue : null;
+  return null;
+};
+
+const getFirestoreBoolean = (field: any): boolean | null => {
+  if (!field || typeof field !== 'object') return null;
+  if (typeof field.booleanValue === 'boolean') return field.booleanValue;
+  return null;
+};
+
+const getFirestoreTimestamp = (field: any): Date | null => {
+  if (!field || typeof field !== 'object' || typeof field.timestampValue !== 'string') return null;
+  const parsed = new Date(field.timestampValue);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
+
+const getFirestoreString = (field: any): string | null => {
+  if (!field || typeof field !== 'object') return null;
+  if (typeof field.stringValue === 'string') return field.stringValue;
+  return null;
+};
+
+const hexToRgb = (hex: string) => {
+  const clean = hex.replace('#', '');
+  const full = clean.length === 3
+    ? clean.split('').map(ch => ch + ch).join('')
+    : clean;
+  const value = parseInt(full, 16);
+  return {
+    r: (value >> 16) & 255,
+    g: (value >> 8) & 255,
+    b: value & 255,
+  };
+};
+
+const mixHex = (fromHex: string, toHex: string, t: number) => {
+  const from = hexToRgb(fromHex);
+  const to = hexToRgb(toHex);
+  const n = Math.max(0, Math.min(1, t));
+  const r = Math.round(from.r + (to.r - from.r) * n);
+  const g = Math.round(from.g + (to.g - from.g) * n);
+  const b = Math.round(from.b + (to.b - from.b) * n);
+  return `rgb(${r}, ${g}, ${b})`;
+};
+
+const getSmoothShieldColor = (percent: number) => {
+  const p = Math.max(0, Math.min(1, percent));
+  if (p <= 0.1) return '#888888';
+  if (p <= 0.3) return mixHex('#888888', '#FF6B00', (p - 0.1) / 0.2);
+  if (p <= 0.5) return mixHex('#FF6B00', '#D69E2E', (p - 0.3) / 0.2);
+  return mixHex('#D69E2E', '#E53E3E', (p - 0.5) / 0.5);
+};
+
+const getInactivityTimeout = (level: number) => {
+  if (level <= 2) return 10000;
+  if (level <= 4) return 20000;
+  return 30000;
+};
 
 const EXPENSE_UI_MAP: Record<ExpenseCategory, { emoji: string; iconBg: string; label: string }> = {
   food: { emoji: '🍔', iconBg: '#FEF3E8', label: 'Food' },
@@ -331,29 +494,183 @@ const EXPENSE_UI_MAP: Record<ExpenseCategory, { emoji: string; iconBg: string; l
 export const HomeScreen: React.FC = () => {
   const { summary, addExpense, updateFinancialInput } = useFinancials();
   const {
+    totalIncome,
     dailySpent,
     activeDailyBudget,
     criticalDailyLimit,
     todayDynamicBudget,
-    vaultSweep,
-    ovsScore,
+    ovrScore,
     setTotalIncome,
     setDailySpent,
     setCustomDailyLimit,
   } = useWealth();
 
-  const safeBudget = activeDailyBudget > 0 ? activeDailyBudget : 1;
-  const shieldPercentage =
-    activeDailyBudget > 0 ? Math.max(0, (safeBudget - dailySpent) / safeBudget) : 0;
-  const shieldRadius = 68;
+  const [currentTime, setCurrentTime] = useState(new Date());
+  const [shieldSettings, setShieldSettings] = useState<ShieldSettings>({
+    activeDailyBudget,
+    salaryConfirmed: null,
+    incomeConfirmedAt: null,
+    dailySpent,
+  });
+  const [trackData, setTrackData] = useState<TrackRingData>({
+    trackLevel: 4,
+    activeMinutesToday: 0,
+    entriesToday: 0,
+    lastActiveDate: new Date().toDateString(),
+  });
+  const [vaultSummary, setVaultSummary] = useState<VaultSummary>({
+    pocketedToday: 0,
+    totalPocketed: 0,
+    lockTarget: 0,
+    locked: true,
+    lastPocketDate: new Date().toDateString(),
+  });
+  const [firestoreMinutes, setFirestoreMinutes] = useState(0);
+  const [, setDisplayTick] = useState(0);
+  const [firestoreUserId, setFirestoreUserId] = useState<string | null>(FIRESTORE_USER_ID ?? null);
+  const [firestoreMacroScore, setFirestoreMacroScore] = useState<number | null>(null);
+  const [firestoreOvrScore, setFirestoreOvrScore] = useState<number | null>(null);
+  const [isActive, setIsActive] = useState(true);
+  const [pocketSplitPct, setPocketSplitPct] = useState(50);
+  const inactivityTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const localSeconds = useRef(0);
+  const tickInterval = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastSaveTime = useRef(Date.now());
+  const firestoreMinutesRef = useRef(0);
+  const entriesTodayRef = useRef(0);
+
+  const now = currentTime;
+  const effectiveDailyBudget = activeDailyBudget > 0
+    ? activeDailyBudget
+    : shieldSettings.activeDailyBudget;
+  const effectiveDailySpent = dailySpent >= 0
+    ? dailySpent
+    : shieldSettings.dailySpent;
+  const localSalaryConfirmed = totalIncome > 0;
+  const salaryConfirmed = shieldSettings.salaryConfirmed ?? localSalaryConfirmed;
+  const isIncomeConfirmed = salaryConfirmed === true && activeDailyBudget > 0;
+  const incomeConfirmedAt = shieldSettings.incomeConfirmedAt;
+  useEffect(() => {
+    console.log('salaryConfirmed:', salaryConfirmed);
+    console.log('activeDailyBudget:', effectiveDailyBudget);
+    console.log('incomeConfirmedAt:', incomeConfirmedAt);
+  }, [salaryConfirmed, effectiveDailyBudget, incomeConfirmedAt]);
+
+  const shieldRadius = 64;
   const shieldCircumference = 2 * Math.PI * shieldRadius;
-  const shieldOffset = shieldCircumference - (shieldPercentage * shieldCircumference);
+  const totalMinutesNow = now.getHours() * 60 + now.getMinutes();
+  const entryScale = [0, 1, 2, 4, 8, 12, 18, 22, 26, 30, 35];
+  const trackLevel = Math.max(1, Math.min(10, Math.round(trackData.trackLevel || 4)));
+  const requiredMins = Math.pow(2, trackLevel - 1);
+  const requiredSeconds = requiredMins * 60;
+  const requiredLogs = entryScale[trackLevel] || 1;
+  const totalActiveSeconds = (firestoreMinutes * 60) + localSeconds.current;
+  const timeProgress = Math.min(totalActiveSeconds / requiredSeconds, 1);
+  const entryProgress = Math.min(trackData.entriesToday / requiredLogs, 1);
+  const trackPercentage = !isIncomeConfirmed ? 0 : (timeProgress + entryProgress) / 2;
+  const trackPercent = Math.round(trackPercentage * 100);
+  const trackRadius = 50;
+  const trackCircumference = 2 * Math.PI * trackRadius;
+  const trackOffset = trackCircumference - trackPercentage * trackCircumference;
+  const trackColor = !isIncomeConfirmed
+    ? '#888888'
+    : trackPercentage >= 1
+    ? '#63B3ED'
+    : '#3182CE';
+  const safePocketSplitPct = Number.isFinite(pocketSplitPct) ? Math.max(10, Math.min(90, Math.round(pocketSplitPct))) : 50;
+  const unspent = Math.max(0, activeDailyBudget - dailySpent);
+  const pocketAmount = unspent * (safePocketSplitPct / 100);
+  const pocketDisplay = Number.isFinite(pocketAmount) ? Math.max(0, Math.floor(pocketAmount)) : 0;
+  const healDisplay = Math.floor(unspent * ((100 - safePocketSplitPct) / 100));
+  const pocketGoal = pocketAmount;
+  const buildPercentage = !isIncomeConfirmed
+    ? 0
+    : pocketGoal > 0
+    ? Math.min(vaultSummary.pocketedToday / pocketGoal, 1)
+    : 0;
+  const buildColor = !isIncomeConfirmed
+    ? '#888888'
+    : buildPercentage >= 1
+    ? '#68D391'
+    : '#38A169';
+
+  useEffect(() => {
+    console.log('pocketedToday:', vaultSummary.pocketedToday);
+    console.log('pocketGoal:', pocketGoal);
+    console.log('buildPercentage:', buildPercentage);
+    console.log('unspent:', unspent);
+    console.log('pocketSplitPct:', safePocketSplitPct);
+    console.log('dailySpent:', dailySpent);
+    console.log('activeDailyBudget:', activeDailyBudget);
+  }, [
+    vaultSummary.pocketedToday,
+    pocketGoal,
+    buildPercentage,
+    unspent,
+    safePocketSplitPct,
+    dailySpent,
+    activeDailyBudget,
+  ]);
+
+  useEffect(() => {
+    console.log('trackLevel:', trackLevel);
+    console.log('requiredMins:', requiredMins);
+    console.log('requiredSeconds:', requiredSeconds);
+    console.log('requiredLogs:', requiredLogs);
+    console.log('entriesToday:', trackData.entriesToday);
+    console.log('activeMinutesToday:', firestoreMinutes);
+    console.log('totalActiveSeconds:', totalActiveSeconds);
+    console.log('entryProgress:', entryProgress);
+    console.log('timeProgress:', timeProgress);
+    console.log('trackPercentage:', trackPercentage);
+  }, [
+    trackLevel,
+    requiredMins,
+    requiredSeconds,
+    requiredLogs,
+    trackData.entriesToday,
+    firestoreMinutes,
+    totalActiveSeconds,
+    entryProgress,
+    timeProgress,
+    trackPercentage,
+  ]);
+
+  let shieldPercentage = 0;
+  let shieldOffset = shieldCircumference;
+  let shieldColor = '#888888';
+
+  if (isIncomeConfirmed) {
+    const confirmedToday = incomeConfirmedAt ? isSameDay(incomeConfirmedAt, now) : false;
+    const startMinute =
+      confirmedToday && incomeConfirmedAt
+        ? incomeConfirmedAt.getHours() * 60 + incomeConfirmedAt.getMinutes()
+        : 0;
+    const minutesElapsed = Math.max(0, totalMinutesNow - startMinute);
+    const availableMinutes = Math.max(1, 1440 - startMinute);
+    const timePercent = minutesElapsed / availableMinutes;
+    const safeBudget = effectiveDailyBudget > 0 ? effectiveDailyBudget : 1;
+    const spendPercent = Math.min(effectiveDailySpent / safeBudget, 1);
+
+    shieldPercentage = Math.max(0, timePercent - spendPercent);
+    shieldOffset = shieldCircumference - shieldPercentage * shieldCircumference;
+    shieldColor = getSmoothShieldColor(shieldPercentage);
+  }
+  const shieldPts = Math.max(0, Math.min(shieldPercentage, 1)) * 20;
+  const trackPts = Math.max(0, Math.min(trackPercentage, 1)) * 10;
+  const buildPts = Math.max(0, Math.min(buildPercentage, 1)) * 10;
+  const microScore = shieldPts + trackPts + buildPts;
+  const computedOvrScore = Math.round(Math.min(microScore + (firestoreMacroScore ?? 30), 100));
+  const heroOvrScore = firestoreOvrScore ?? computedOvrScore;
+  const currentInsight = '₹1,200 more this week for MacBook';
+  const insightText = !isIncomeConfirmed ? 'Confirm your income to start' : currentInsight;
+  const insightIcon = !isIncomeConfirmed ? '🔒' : '✦';
   const { width: screenWidth, height: screenHeight } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
-  const HEADER_HEIGHT = SCREEN_HEIGHT * 0.40;
+  const HEADER_HEIGHT = SCREEN_HEIGHT * NAVY_SECTION_RATIO;
   const CARD_ROW_WIDTH = SCREEN_WIDTH - 40;
-  const CARD_SIZE = CARD_ROW_WIDTH * 0.48 * 0.9025;
+  const CARD_SIZE = CARD_ROW_WIDTH * 0.48 * 0.9025 * HOME_CARD_SCALE;
   const CARD_CENTER_GAP = CARD_ROW_WIDTH * 0.03;
   const CARD_ROW_SIDE_MARGIN = Math.max(
     0,
@@ -366,7 +683,7 @@ export const HomeScreen: React.FC = () => {
 
   const [activeTab, setActiveTab] = useState<TabKey>('Daily');
   const [activeNav, setActiveNav] = useState<NavKey>('home');
-  const [activeRootTab, setActiveRootTab] = useState<'Home' | 'More' | 'IncomeEngine'>('Home');
+  const [activeRootTab, setActiveRootTab] = useState<'Home' | 'More' | 'IncomeEngine' | 'Wealth'>('Home');
   const [incomeActivity, setIncomeActivity] = useState<IncomeSourceLog[]>([]);
   const [expenseActivity, setExpenseActivity] = useState<Expense[]>([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -375,7 +692,6 @@ export const HomeScreen: React.FC = () => {
   const rootRef = useRef<View>(null);
   const heroRingsRef = useRef<View>(null);
   const sweepPillRef = useRef<View>(null);
-  const sweepPressAnim = useRef(new Animated.Value(0)).current;
 
   const [isExpenseModalVisible, setIsExpenseModalVisible] = useState(false);
   const [expenseAmount, setExpenseAmount] = useState('0');
@@ -383,13 +699,393 @@ export const HomeScreen: React.FC = () => {
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   const [isRecurring, setIsRecurring] = useState(false);
 
-  const dailyLimit = activeDailyBudget;
+  const dailyLimit = effectiveDailyBudget;
   const dynamicDailyMax = todayDynamicBudget;
   const criticalDailyFloor = criticalDailyLimit;
 
   /** ~20% of screen — scales all scroll-linked transitions (replaces fixed 80–120px band). */
   const sa = scrollAnimSpanPx(screenHeight);
   const sk = sa / 120;
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setCurrentTime(new Date());
+    }, 60000);
+
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    firestoreMinutesRef.current = firestoreMinutes;
+    entriesTodayRef.current = trackData.entriesToday;
+  }, [firestoreMinutes, trackData.entriesToday]);
+
+  const buildTrackDocUrl = useCallback(
+    (userId: string) =>
+      `https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/(default)/documents/users/${userId}/gamification/track_ring`,
+    [],
+  );
+
+  const buildVaultSummaryUrl = useCallback(
+    (userId: string) =>
+      `https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/(default)/documents/users/${userId}/vault/summary`,
+    [],
+  );
+
+  const patchTrackRingDoc = useCallback(
+    async (userId: string, patch: Partial<TrackRingData>) => {
+      if (!FIRESTORE_PROJECT_ID) return;
+      const fields: Record<string, any> = {};
+      if (typeof patch.activeMinutesToday === 'number') {
+        fields.activeMinutesToday = { doubleValue: patch.activeMinutesToday };
+      }
+      if (typeof patch.entriesToday === 'number') {
+        fields.entriesToday = { integerValue: Math.max(0, Math.round(patch.entriesToday)).toString() };
+      }
+      if (typeof patch.lastActiveDate === 'string') {
+        fields.lastActiveDate = { stringValue: patch.lastActiveDate };
+      }
+      if (!Object.keys(fields).length) return;
+      await fetch(buildTrackDocUrl(userId), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fields }),
+      }).catch(() => {});
+    },
+    [buildTrackDocUrl],
+  );
+
+  const patchVaultSummaryDoc = useCallback(
+    async (userId: string, patch: Partial<VaultSummary>) => {
+      if (!FIRESTORE_PROJECT_ID) return;
+      const fields: Record<string, any> = {};
+      if (typeof patch.pocketedToday === 'number') {
+        fields.pocketedToday = { doubleValue: patch.pocketedToday };
+      }
+      if (typeof patch.totalPocketed === 'number') {
+        fields.totalPocketed = { doubleValue: patch.totalPocketed };
+      }
+      if (typeof patch.lockTarget === 'number') {
+        fields.lockTarget = { doubleValue: patch.lockTarget };
+      }
+      if (typeof patch.locked === 'boolean') {
+        fields.locked = { booleanValue: patch.locked };
+      }
+      if (typeof patch.lastPocketDate === 'string') {
+        fields.lastPocketDate = { stringValue: patch.lastPocketDate };
+      }
+      if (!Object.keys(fields).length) return;
+      await fetch(buildVaultSummaryUrl(userId), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fields }),
+      }).catch(() => {});
+    },
+    [buildVaultSummaryUrl],
+  );
+
+  const saveToFirestore = useCallback(async () => {
+    if (!isIncomeConfirmed) return;
+    if (!firestoreUserId) return;
+    if (localSeconds.current < 1) return;
+    const minutesToSave = localSeconds.current / 60;
+    localSeconds.current = 0;
+    lastSaveTime.current = Date.now();
+    const todayStr = new Date().toDateString();
+    const nextMinutes = firestoreMinutesRef.current + minutesToSave;
+    firestoreMinutesRef.current = nextMinutes;
+    setFirestoreMinutes(nextMinutes);
+    setTrackData(prev => ({ ...prev, activeMinutesToday: nextMinutes, lastActiveDate: todayStr }));
+    await patchTrackRingDoc(firestoreUserId, {
+      activeMinutesToday: nextMinutes,
+      lastActiveDate: todayStr,
+    });
+    console.log('Saved to Firestore:', minutesToSave, 'mins');
+  }, [firestoreUserId, isIncomeConfirmed, patchTrackRingDoc]);
+
+  const startTicking = useCallback(() => {
+    if (!isIncomeConfirmed) {
+      console.log('Income not confirmed — TRACK timer blocked');
+      return;
+    }
+    if (tickInterval.current) return;
+    tickInterval.current = setInterval(() => {
+      localSeconds.current += 1;
+      setDisplayTick(prev => prev + 1);
+      const secondsSinceLastSave = (Date.now() - lastSaveTime.current) / 1000;
+      if (secondsSinceLastSave >= 30) {
+        saveToFirestore();
+      }
+    }, 1000);
+  }, [isIncomeConfirmed, saveToFirestore]);
+
+  const stopTicking = useCallback(() => {
+    if (tickInterval.current) {
+      clearInterval(tickInterval.current);
+      tickInterval.current = null;
+    }
+    saveToFirestore();
+  }, [saveToFirestore]);
+
+  const handleUserActivity = useCallback(() => {
+    if (!tickInterval.current) {
+      startTicking();
+    }
+    if (inactivityTimer.current) clearTimeout(inactivityTimer.current);
+    const timeoutMs = getInactivityTimeout(trackLevel);
+    inactivityTimer.current = setTimeout(() => {
+      setIsActive(false);
+      stopTicking();
+      console.log(`Level ${trackLevel} — inactive timeout reached, timer paused`);
+    }, timeoutMs);
+  }, [startTicking, stopTicking, trackLevel]);
+
+  useEffect(() => {
+    let mounted = true;
+
+    const readShieldSettings = async () => {
+      try {
+        const savedUserId = await AsyncStorage.getItem('wos_user_id');
+        const userId = FIRESTORE_USER_ID || savedUserId;
+        if (userId && mounted) setFirestoreUserId(userId);
+        if (!FIRESTORE_PROJECT_ID || !userId) {
+          if (mounted) {
+            setShieldSettings({
+              activeDailyBudget,
+              salaryConfirmed: localSalaryConfirmed,
+              incomeConfirmedAt: null,
+              dailySpent,
+            });
+          }
+          return;
+        }
+        const docUrl = `https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/(default)/documents/users/${userId}/settings`;
+        const trackUrl = buildTrackDocUrl(userId);
+        const vaultUrl = buildVaultSummaryUrl(userId);
+        const dailyScoresUrl = `https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/(default)/documents/users/${userId}/gamification/daily_scores`;
+        const profileUrl = `https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/(default)/documents/users/${userId}/profile`;
+        const incomeUrl = `https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/(default)/documents/users/${userId}/income`;
+        const [settingsRes, trackRes, vaultRes, dailyScoresRes, profileRes, incomeRes] = await Promise.all([
+          fetch(docUrl),
+          fetch(trackUrl),
+          fetch(vaultUrl),
+          fetch(dailyScoresUrl),
+          fetch(profileUrl),
+          fetch(incomeUrl),
+        ]);
+        if (!settingsRes.ok) return;
+        const doc = await settingsRes.json();
+        const trackDoc = trackRes.ok ? await trackRes.json() : null;
+        const vaultDoc = vaultRes.ok ? await vaultRes.json() : null;
+        const dailyScoresDoc = dailyScoresRes.ok ? await dailyScoresRes.json() : null;
+        const profileDoc = profileRes.ok ? await profileRes.json() : null;
+        const fields = doc?.fields ?? {};
+        const trackFields = trackDoc?.fields ?? {};
+        const vaultFields = vaultDoc?.fields ?? {};
+        const scoreFields = dailyScoresDoc?.fields ?? {};
+        const profileFields = profileDoc?.fields ?? {};
+        const incomeDocs = incomeRes.ok ? (await incomeRes.json())?.documents ?? [] : [];
+        const salaryConfirmedParsed = getFirestoreBoolean(fields.salaryConfirmed);
+        const activeDailyBudgetParsed = getFirestoreNumber(fields.activeDailyBudget);
+        const allocationPctRaw = getFirestoreNumber(fields.allocationPct);
+        const allocationPctParsed = typeof allocationPctRaw === 'number' ? allocationPctRaw : 10;
+        const nowMonth = new Date().getMonth();
+        const nowYear = new Date().getFullYear();
+        let confirmedIncome = 0;
+        for (const incomeDoc of incomeDocs) {
+          const f = incomeDoc?.fields || {};
+          const rawName = String(f.name?.stringValue || f.title?.stringValue || '');
+          const amount = getFirestoreNumber(f.amount);
+          const confirmed = getFirestoreBoolean(f.confirmed);
+          const expected = getFirestoreTimestamp(f.expected_date) || getFirestoreTimestamp(f.confirmed_at);
+          const safeAmount = typeof amount === 'number' ? amount : 0;
+          if (/^dff$/i.test(rawName.trim()) && safeAmount >= 5000000) {
+            const id = String(incomeDoc?.name || '').split('/').pop();
+            if (id) {
+              const delUrl = `https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/(default)/documents/users/${userId}/income/${id}`;
+              fetch(delUrl, { method: 'DELETE' }).catch(() => {});
+            }
+            continue;
+          }
+          if (!confirmed) continue;
+          if (expected && (expected.getMonth() !== nowMonth || expected.getFullYear() !== nowYear)) continue;
+          confirmedIncome += Math.max(0, safeAmount);
+        }
+        const monthlyPool = Math.floor(confirmedIncome * (Math.max(1, Math.min(50, allocationPctParsed)) / 100));
+        const computedDailyBudget = Math.floor(monthlyPool / 30);
+        const incomeConfirmedAtParsed = getFirestoreTimestamp(fields.incomeConfirmedAt);
+        const pocketSplitParsed = getFirestoreNumber(fields.pocketSplitPct);
+        console.log('shield/settings salaryConfirmed raw:', fields.salaryConfirmed);
+        console.log('shield/settings salaryConfirmed parsed:', salaryConfirmedParsed);
+        console.log('shield/settings activeDailyBudget parsed:', activeDailyBudgetParsed);
+        console.log('shield/settings incomeConfirmedAt parsed:', incomeConfirmedAtParsed);
+        if (!mounted) return;
+        setShieldSettings({
+          activeDailyBudget: Number.isFinite(computedDailyBudget) ? computedDailyBudget : (activeDailyBudgetParsed ?? activeDailyBudget),
+          salaryConfirmed: salaryConfirmedParsed ?? localSalaryConfirmed,
+          incomeConfirmedAt: incomeConfirmedAtParsed,
+          dailySpent: getFirestoreNumber(fields.dailySpent) ?? dailySpent,
+        });
+        console.log('confirmedIncome:', confirmedIncome);
+        console.log('allocationPct:', allocationPctParsed);
+        console.log('monthlyPool:', monthlyPool);
+        console.log('dailyBudget:', computedDailyBudget);
+        setPocketSplitPct(
+          pocketSplitParsed !== null
+            ? Math.max(10, Math.min(90, Math.round(pocketSplitParsed)))
+            : 50,
+        );
+        const macroFromDaily =
+          getFirestoreNumber(scoreFields.macroScore) ??
+          getFirestoreNumber(scoreFields.macro_score);
+        const ovrFromDaily = getFirestoreNumber(scoreFields.ovrScore);
+        const ovrFromProfile = getFirestoreNumber(profileFields.ovrScore);
+        setFirestoreMacroScore(
+          typeof macroFromDaily === 'number' ? Math.max(0, Math.min(60, Math.round(macroFromDaily))) : null,
+        );
+        const resolvedOvr = ovrFromDaily ?? ovrFromProfile;
+        setFirestoreOvrScore(
+          typeof resolvedOvr === 'number' ? Math.max(0, Math.min(100, Math.round(resolvedOvr))) : null,
+        );
+        const todayStr = new Date().toDateString();
+        const remoteLastActiveDate = getFirestoreString(trackFields.lastActiveDate) ?? todayStr;
+        const incomingTrackLevel = getFirestoreNumber(fields.trackLevel) ?? 4;
+        const nextTrackDefaults: TrackRingData = {
+          trackLevel: incomingTrackLevel,
+          activeMinutesToday: 0,
+          entriesToday: 0,
+          lastActiveDate: todayStr,
+        };
+        if (!trackRes.ok) {
+          setFirestoreMinutes(0);
+          setTrackData(nextTrackDefaults);
+          patchTrackRingDoc(userId, {
+            activeMinutesToday: 0,
+            entriesToday: 0,
+            lastActiveDate: todayStr,
+          }).catch(() => {});
+          return;
+        }
+        if (remoteLastActiveDate !== todayStr) {
+          setFirestoreMinutes(0);
+          setTrackData(nextTrackDefaults);
+          patchTrackRingDoc(userId, {
+            activeMinutesToday: 0,
+            entriesToday: 0,
+            lastActiveDate: todayStr,
+          }).catch(() => {});
+        } else {
+          const remoteMinutes = getFirestoreNumber(trackFields.activeMinutesToday) ?? 0;
+          setFirestoreMinutes(remoteMinutes);
+          setTrackData({
+            trackLevel: incomingTrackLevel,
+            activeMinutesToday: remoteMinutes,
+            entriesToday: getFirestoreNumber(trackFields.entriesToday) ?? 0,
+            lastActiveDate: remoteLastActiveDate,
+          });
+        }
+
+        const incomingLockTarget = getFirestoreNumber(vaultFields.lockTarget) ?? Math.max(0, totalIncome * 0.1);
+        const lastPocketDate = getFirestoreString(vaultFields.lastPocketDate) ?? todayStr;
+        if (!vaultRes.ok) {
+          const defaults: VaultSummary = {
+            pocketedToday: 0,
+            totalPocketed: 0,
+            lockTarget: incomingLockTarget,
+            locked: true,
+            lastPocketDate: todayStr,
+          };
+          setVaultSummary(defaults);
+          patchVaultSummaryDoc(userId, defaults).catch(() => {});
+          console.log('vault/summary created with defaults');
+        } else {
+          const rawPocketedToday = getFirestoreNumber(vaultFields.pocketedToday) ?? 0;
+          const nextPocketedToday = lastPocketDate === todayStr ? rawPocketedToday : 0;
+          setVaultSummary({
+            pocketedToday: nextPocketedToday,
+            totalPocketed: getFirestoreNumber(vaultFields.totalPocketed) ?? 0,
+            lockTarget: incomingLockTarget,
+            locked: getFirestoreBoolean(vaultFields.locked) ?? true,
+            lastPocketDate: todayStr,
+          });
+          if (lastPocketDate !== todayStr) {
+            patchVaultSummaryDoc(userId, {
+              pocketedToday: 0,
+              lastPocketDate: todayStr,
+            }).catch(() => {});
+          }
+          console.log('vault summary mapping check:', {
+            pocketedToday: rawPocketedToday,
+            totalPocketed: getFirestoreNumber(vaultFields.totalPocketed) ?? 0,
+            lockTarget: incomingLockTarget,
+            locked: getFirestoreBoolean(vaultFields.locked) ?? true,
+            lastPocketDate,
+          });
+        }
+      } catch {
+        if (mounted) {
+          setShieldSettings({
+            activeDailyBudget,
+            salaryConfirmed: localSalaryConfirmed,
+            incomeConfirmedAt: null,
+            dailySpent,
+          });
+          setFirestoreMacroScore(null);
+          setFirestoreOvrScore(null);
+        }
+      }
+    };
+
+    readShieldSettings();
+    const poll = setInterval(readShieldSettings, 60000);
+
+    return () => {
+      mounted = false;
+      clearInterval(poll);
+    };
+  }, [
+    activeDailyBudget,
+    dailySpent,
+    localSalaryConfirmed,
+    buildTrackDocUrl,
+    buildVaultSummaryUrl,
+    effectiveDailyBudget,
+    patchTrackRingDoc,
+    patchVaultSummaryDoc,
+  ]);
+
+  useEffect(() => {
+    updateUserSettingsFirestoreRecord({
+      activeDailyBudget,
+      dailySpent,
+    }).catch(() => {});
+  }, [activeDailyBudget, dailySpent]);
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state: AppStateStatus) => {
+      if (state === 'active') {
+        setIsActive(true);
+        startTicking();
+      } else {
+        setIsActive(false);
+        stopTicking();
+      }
+    });
+    startTicking();
+    return () => {
+      sub.remove();
+      if (inactivityTimer.current) clearTimeout(inactivityTimer.current);
+      stopTicking();
+    };
+  }, [startTicking, stopTicking]);
+
+  useEffect(() => {
+    if (!isIncomeConfirmed) {
+      stopTicking();
+    } else if (AppState.currentState === 'active') {
+      startTicking();
+    }
+  }, [isIncomeConfirmed, startTicking, stopTicking]);
 
   useEffect(() => {
     const thr = 72 * sk;
@@ -449,9 +1145,26 @@ export const HomeScreen: React.FC = () => {
   const txListExpandedTopInset = Math.round(EXPANDED_ACTIVITY_TOP + 196);
 
   const METRICS = [
-    { icon: '🛡️', label: 'Shield', value: `₹${dailySpent.toFixed(0)} / ${activeDailyBudget.toFixed(0)}`, color: SHIELD_RED  },
-    { icon: '🎯', label: 'Track',  value: fmt(Math.max(0, summary.income - summary.expenses)), color: BUILD_GREEN },
-    { icon: '📈', label: 'Build',  value: fmt(Math.max(0, summary.savings ?? 0)),               color: '#3182CE'   },
+    {
+      icon: '🛡️',
+      label: 'Shield',
+      value: !isIncomeConfirmed ? '₹0 / –' : `₹${effectiveDailySpent.toFixed(0)} / ${effectiveDailyBudget.toFixed(0)}`,
+      color: !isIncomeConfirmed ? '#888888' : shieldColor,
+    },
+    {
+      icon: '🎯',
+      label: 'Track',
+      value: !isIncomeConfirmed ? '–% · Lv4' : `${trackPercent}% · Lv${trackLevel}`,
+      color: !isIncomeConfirmed ? '#888888' : trackColor,
+    },
+    {
+      icon: '📈',
+      label: 'Build',
+      value: !isIncomeConfirmed
+        ? '₹0 / 0'
+        : `₹${Math.floor(vaultSummary.pocketedToday).toFixed(0)} / ${pocketDisplay.toFixed(0)}`,
+      color: !isIncomeConfirmed ? '#888888' : buildColor,
+    },
   ];
 
   const windowHeight = Dimensions.get('window').height;
@@ -674,21 +1387,48 @@ export const HomeScreen: React.FC = () => {
     });
   }, [measureCenterInRoot]);
 
-  const onSweepPressIn = useCallback(() => {
-    Animated.timing(sweepPressAnim, {
-      toValue: 1,
-      duration: 90,
-      useNativeDriver: true,
-    }).start();
-  }, [sweepPressAnim]);
+  const handlePocketNow = useCallback(async () => {
+    const livePocketAmt = unspent * (safePocketSplitPct / 100);
+    const liveHealAmt = unspent * ((100 - safePocketSplitPct) / 100);
+    if (!isIncomeConfirmed || livePocketAmt <= 0) return;
+    launchVaultCoins().catch(() => {});
+    const nextPocketedToday = livePocketAmt;
+    const nextTotalPocketed = vaultSummary.totalPocketed + livePocketAmt;
+    const nextLocked = vaultSummary.lockTarget > 0 ? nextTotalPocketed >= vaultSummary.lockTarget : false;
+    const todayStr = new Date().toDateString();
+    setVaultSummary(prev => ({
+      ...prev,
+      pocketedToday: nextPocketedToday,
+      totalPocketed: nextTotalPocketed,
+      locked: nextLocked,
+      lastPocketDate: todayStr,
+    }));
+    if (firestoreUserId) {
+      await patchVaultSummaryDoc(firestoreUserId, {
+        pocketedToday: nextPocketedToday,
+        totalPocketed: nextTotalPocketed,
+        locked: nextLocked,
+        lastPocketDate: todayStr,
+      });
+    }
+    console.log('Pocketed:', livePocketAmt, 'at', safePocketSplitPct, '%');
+    console.log('Healing future days:', liveHealAmt);
+  }, [
+    firestoreUserId,
+    isIncomeConfirmed,
+    launchVaultCoins,
+    patchVaultSummaryDoc,
+    safePocketSplitPct,
+    unspent,
+    vaultSummary.lockTarget,
+    vaultSummary.totalPocketed,
+  ]);
 
-  const onSweepPressOut = useCallback(() => {
-    Animated.timing(sweepPressAnim, {
-      toValue: 0,
-      duration: 120,
-      useNativeDriver: true,
-    }).start();
-  }, [sweepPressAnim]);
+  useEffect(() => {
+    console.log('pocketSplitPct:', safePocketSplitPct);
+    console.log('unspent:', unspent);
+    console.log('pocketDisplay:', pocketDisplay);
+  }, [safePocketSplitPct, unspent, pocketDisplay]);
 
   const expenseSheetPan = useMemo(
     () =>
@@ -710,7 +1450,49 @@ export const HomeScreen: React.FC = () => {
     Number.isNaN(parseFloat(expenseAmount)) ||
     parseFloat(expenseAmount) <= 0;
 
+  const incrementEntryCount = useCallback(async (): Promise<number> => {
+    const todayStr = new Date().toDateString();
+    const nextEntries = entriesTodayRef.current + 1;
+    entriesTodayRef.current = nextEntries;
+    setTrackData(prev => ({ ...prev, entriesToday: nextEntries, lastActiveDate: todayStr }));
+
+    if (!firestoreUserId || !FIRESTORE_PROJECT_ID) {
+      console.log('incrementEntryCount skipped remote write: missing userId/projectId');
+      return nextEntries;
+    }
+
+    const trackDocUrl = buildTrackDocUrl(firestoreUserId);
+    console.log('Writing to path:', `users/${firestoreUserId}/gamification/track_ring`);
+    try {
+      const existing = await fetch(trackDocUrl);
+      if (!existing.ok) {
+        await patchTrackRingDoc(firestoreUserId, {
+          activeMinutesToday: 0,
+          entriesToday: 1,
+          lastActiveDate: todayStr,
+        });
+        console.log('track_ring doc created with entriesToday: 1');
+        return 1;
+      }
+      await patchTrackRingDoc(firestoreUserId, {
+        entriesToday: nextEntries,
+        lastActiveDate: todayStr,
+      });
+      console.log('entriesToday incremented');
+    } catch {
+      // Keep optimistic local update even if network write fails.
+    }
+    return nextEntries;
+  }, [firestoreUserId, patchTrackRingDoc]);
+
+  const handlePocketDone = useCallback(async () => {
+    updateUserSettingsFirestoreRecord({ pocketSplitPct: safePocketSplitPct }).catch(() => {});
+  }, [safePocketSplitPct]);
+
   const submitExpense = useCallback(async () => {
+    console.log('=== EXPENSE SUBMITTED ===');
+    console.log('entriesToday before:', entriesTodayRef.current);
+    console.log('userId:', firestoreUserId);
     const amt = parseFloat(expenseAmount);
     if (
       expenseAmount === '0' ||
@@ -731,6 +1513,9 @@ export const HomeScreen: React.FC = () => {
         expenseNote.trim() || undefined,
         isRecurring ? true : undefined,
       );
+      const nextEntries = await incrementEntryCount();
+      console.log('entriesToday after increment:', nextEntries);
+      console.log('Entry count incremented');
     } catch {
       const fallbackExpense: Expense = {
         id: `${Date.now()}`,
@@ -742,10 +1527,12 @@ export const HomeScreen: React.FC = () => {
       };
       setExpenseActivity(prev => [fallbackExpense, ...prev]);
       AsyncStorage.setItem(EXPENSE_LOG_KEY, JSON.stringify([fallbackExpense, ...expenseActivity])).catch(() => {});
+      const nextEntries = await incrementEntryCount();
+      console.log('entriesToday after increment:', nextEntries);
     }
     setDailySpent(prev => prev + amt);
     setIsExpenseModalVisible(false);
-  }, [addExpense, expenseAmount, expenseNote, isRecurring, selectedCategory, setDailySpent]);
+  }, [addExpense, expenseAmount, expenseNote, expenseActivity, firestoreUserId, incrementEntryCount, isRecurring, selectedCategory, setDailySpent]);
 
   const handleRefreshReset = useCallback(async () => {
     setIsRefreshing(true);
@@ -886,15 +1673,20 @@ export const HomeScreen: React.FC = () => {
   );
 
   return (
-    <SafeAreaView ref={rootRef} style={s.mainContainer}>
+    <SafeAreaView
+      ref={rootRef}
+      style={s.mainContainer}
+      edges={['left', 'right']}
+      onTouchStart={handleUserActivity}
+    >
       <StatusBar barStyle="light-content" backgroundColor={D.bg} />
 
-      {/* ── NAVY HEADER — fixed 40% height ─────────────────────────────────── */}
-      <View
+      {/* ── NAVY HEADER — fixed 42% height ─────────────────────────────────── */}
+        <View
         style={{
           ...s.navyHeaderFixed,
-          height: Dimensions.get('window').height * 0.40,
-          paddingTop: insets.top + 10,
+          height: Dimensions.get('window').height * NAVY_SECTION_RATIO,
+          paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight || 44) + 8 : insets.top + 8,
           paddingBottom: 8,
           paddingHorizontal: 24,
           backgroundColor: '#0A0E17',
@@ -916,7 +1708,7 @@ export const HomeScreen: React.FC = () => {
         />
 
         {/* 1. TOP GREETING (Locked to the top) */}
-        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', height: 40 }}>
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', height: 44, paddingHorizontal: 16 }}>
           <View>
             <Text style={s.greeting}>Hi, Welcome Back</Text>
             <Text style={s.greetingSub}>Good Morning</Text>
@@ -927,53 +1719,47 @@ export const HomeScreen: React.FC = () => {
           </View>
         </View>
 
-        {/* 2. THE GRAVITY BOX (Takes up 100% of the remaining space and centers everything inside it) */}
-        <View
-          style={{
-            flex: 1,
-            justifyContent: 'flex-end',
-            alignItems: 'center',
-            paddingTop: 0,
-            paddingBottom: 0,
-            transform: [{ translateY: HEADER_HEIGHT * 0.12 }],
-          }}
-        >
-          {/* THE RINGS */}
-          <View
-            style={{
-              flexDirection: 'row',
-              justifyContent: 'center',
-              alignItems: 'center',
-              width: '100%',
-              transform: [
-                { translateX: SCREEN_WIDTH * 0.05 },
-                { translateY: -HEADER_HEIGHT * 0.05 },
-              ],
-            }}
-          >
-            <View ref={heroRingsRef} collapsable={false}>
+        <View style={s.heroArea}>
+          <View style={s.heroSummaryRow}>
+            <View ref={heroRingsRef} collapsable={false} style={s.heroRingLeft}>
               <HeroRings
-                shieldPct={summary.shieldPct}
-                trackPct={summary.trackPct}
-                buildPct={summary.buildPct}
-                score={ovsScore}
+                buildPercentage={buildPercentage}
+              score={heroOvrScore}
                 shieldCircumference={shieldCircumference}
                 shieldOffset={shieldOffset}
+                shieldColor={shieldColor}
+                trackCircumference={trackCircumference}
+                trackOffset={trackOffset}
+                trackColor={trackColor}
+                isLocked={!isIncomeConfirmed}
+                buildColor={buildColor}
               />
             </View>
-            <View style={s.metricStack}>
+            <View style={s.metricListRight}>
               {METRICS.map(m => (
-                <MetricBadge key={m.label} icon={m.icon} label={m.label} value={m.value} color={m.color} />
+                <View key={m.label}>
+                  <Text style={s.metricLabelCompact}>{m.label}</Text>
+                  <Text style={[s.metricValueCompact, { color: m.color }]} numberOfLines={1}>
+                    {m.value}
+                  </Text>
+                </View>
               ))}
             </View>
           </View>
-
-          {/* THE AI INSIGHT PILL */}
-          <View style={{ alignSelf: 'center', marginTop: 12 }}>
-            <TouchableOpacity style={s.insightPill} activeOpacity={0.75}>
-              <Text style={s.insightSpark}>✦</Text>
+          <View style={s.insightWrap}>
+            <TouchableOpacity
+              style={s.insightPill}
+              activeOpacity={0.75}
+              onPress={() => {
+                if (!isIncomeConfirmed) {
+                  setActiveNav('incomeEngine');
+                  setActiveRootTab('IncomeEngine');
+                }
+              }}
+            >
+              <Text style={s.insightSpark}>{insightIcon}</Text>
               <Text style={s.insightText} numberOfLines={1}>
-                ₹1,200 more this week for MacBook
+                {insightText}
               </Text>
               <Text style={s.insightArrow}>›</Text>
             </TouchableOpacity>
@@ -1031,60 +1817,16 @@ export const HomeScreen: React.FC = () => {
 
             <Animated.View style={[{ opacity: squareOpacity, transform: [{ translateY: squareTranslateY }] }]}>
               <View style={{ height: CARD_SIZE, width: '100%', position: 'relative', marginTop: Math.max(0, 20 - CARD_SIZE * 0.03) }}>
-                {/* Yellow Vault Sweep Card (Static Background) */}
-                <View style={{ position: 'absolute', right: CARD_ROW_SIDE_MARGIN, width: CARD_SIZE, height: CARD_SIZE, borderRadius: 24, overflow: 'hidden' }}>
-                  <View style={s.vaultCard}>
-                    <View style={s.vaultTopRow}>
-                      <View style={s.vaultIndicator}><Text style={{ fontSize: 13 }}>💛</Text></View>
-                      <Animated.View
-                        ref={sweepPillRef}
-                        collapsable={false}
-                        style={[
-                          s.sweepPillPressWrap,
-                          {
-                            transform: [
-                              {
-                                translateY: sweepPressAnim.interpolate({
-                                  inputRange: [0, 1],
-                                  outputRange: [0, 2],
-                                }),
-                              },
-                              {
-                                scale: sweepPressAnim.interpolate({
-                                  inputRange: [0, 1],
-                                  outputRange: [1, 0.97],
-                                }),
-                              },
-                            ],
-                          },
-                        ]}
-                      >
-                        <TouchableOpacity
-                          style={s.sweepPill}
-                          activeOpacity={1}
-                          onPressIn={onSweepPressIn}
-                          onPressOut={onSweepPressOut}
-                          onPress={launchVaultCoins}
-                        >
-                          <Text style={s.sweepPillIcon}>◎</Text>
-                          <Text style={s.sweepPillTxt}>SWEEP{'\n'}TO VAULT</Text>
-                        </TouchableOpacity>
-                      </Animated.View>
-                    </View>
-                    <View style={s.vaultBottom}>
-                      <Text style={s.vaultLabel}>VAULT SWEEP</Text>
-                      <Text
-                        style={s.vaultAmount}
-                        numberOfLines={1}
-                        adjustsFontSizeToFit
-                        minimumFontScale={0.6}
-                      >
-                        ₹{vaultSweep.toFixed(0)}
-                      </Text>
-                      <Text style={s.vaultSub}>UNSPENT</Text>
-                    </View>
-                  </View>
-                </View>
+                <PocketSplitCard
+                  cardSize={CARD_SIZE}
+                  rightOffset={CARD_ROW_SIDE_MARGIN}
+                  pocketSplitPct={pocketSplitPct}
+                  setPocketSplitPct={setPocketSplitPct}
+                  onDone={handlePocketDone}
+                  onPocketNow={handlePocketNow}
+                  unspent={unspent}
+                  pocketButtonRef={sweepPillRef}
+                />
 
                 {/* Flipping Daily Budget Card (Animated Overlay) */}
                 <DailyBudgetCard
@@ -1125,7 +1867,7 @@ export const HomeScreen: React.FC = () => {
               <View style={[s.expandedPillCard, s.expandedPillCardDark]}>
                 <View style={s.expandedPillIconWrapYellow}><Text style={s.expandedPillIconDark}>💛</Text></View>
                 <View style={s.expandedPillCopy}>
-                  <Text style={s.expandedPillLabel}>VAULT SWEEP</Text>
+                  <Text style={s.expandedPillLabel}>POCKET IT</Text>
                   <View style={s.expandedPillAmount}>
                     <Text
                       style={s.expandedPillAmountStrong}
@@ -1133,7 +1875,7 @@ export const HomeScreen: React.FC = () => {
                       adjustsFontSizeToFit
                       minimumFontScale={0.6}
                     >
-                      ₹{vaultSweep.toFixed(0)}
+                      ₹{pocketDisplay.toFixed(0)}
                     </Text>
                   </View>
                 </View>
@@ -1249,6 +1991,10 @@ export const HomeScreen: React.FC = () => {
           <MoreScreen
             onIncomeEnginePress={() => setActiveRootTab('IncomeEngine')}
             onLoanPress={() => setActiveRootTab('Home')}
+            headerShieldPct={Math.round(shieldPercentage * 100)}
+            headerTrackPct={Math.round(trackPercentage * 100)}
+            headerBuildPct={Math.round(buildPercentage * 100)}
+            headerOvrScore={ovrScore}
             onBack={() => {
               setActiveNav('home');
               setActiveRootTab('Home');
@@ -1269,7 +2015,38 @@ export const HomeScreen: React.FC = () => {
             backgroundColor: '#0A0E17',
           }}
         >
-          <IncomeEngineScreen onBack={() => setActiveRootTab('More')} />
+          <IncomeEngineScreen
+            onBack={() => setActiveRootTab('More')}
+            headerShieldPct={Math.round(shieldPercentage * 100)}
+            headerTrackPct={Math.round(trackPercentage * 100)}
+            headerBuildPct={Math.round(buildPercentage * 100)}
+            headerOvrScore={ovrScore}
+          />
+        </View>
+      )}
+
+      {activeRootTab === 'Wealth' && (
+        <View
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            zIndex: 40,
+            backgroundColor: '#0A0E17',
+          }}
+        >
+          <WealthScreen
+            onBack={() => {
+              setActiveNav('home');
+              setActiveRootTab('Home');
+            }}
+            headerShieldPct={Math.round(shieldPercentage * 100)}
+            headerTrackPct={Math.round(trackPercentage * 100)}
+            headerBuildPct={Math.round(buildPercentage * 100)}
+            headerOvrScore={ovrScore}
+          />
         </View>
       )}
 
@@ -1283,11 +2060,11 @@ export const HomeScreen: React.FC = () => {
         <View style={s.tabBar}>
           <NavItem icon="home" label="Home" active={activeNav === 'home'} onPress={() => { setActiveNav('home'); setActiveRootTab('Home'); }} />
           <NavItem icon="credit-card" label="Spend" active={activeNav === 'spend'} onPress={() => { setActiveNav('spend'); setActiveRootTab('Home'); }} />
-          <NavItem icon="account-balance-wallet" label="Wealth" active={activeNav === 'wealth'} onPress={() => { setActiveNav('wealth'); setActiveRootTab('Home'); }} />
+          <NavItem icon="account-balance-wallet" label="Wealth" active={activeNav === 'wealth'} onPress={() => { setActiveNav('wealth'); setActiveRootTab('Wealth'); }} />
           <NavItem icon="savings" label="IE" active={activeNav === 'incomeEngine'} onPress={() => { setActiveNav('incomeEngine'); setActiveRootTab('IncomeEngine'); }} />
           <NavItem icon="more-horiz" label="More" active={activeNav === 'more'} onPress={() => { setActiveNav('more'); setActiveRootTab('More'); }} />
 
-          {activeRootTab !== 'IncomeEngine' ? (
+          {activeRootTab === 'Home' ? (
             <View style={s.fabAbsWrap} pointerEvents="box-none">
               <TouchableOpacity style={s.fab} onPress={() => setIsExpenseModalVisible(true)} activeOpacity={0.85}>
                 <Text style={s.fabIcon}>+</Text>
@@ -1339,7 +2116,8 @@ const s = StyleSheet.create({
     top: 0,
     left: 0,
     right: 0,
-    zIndex: -1,
+    // Android can hide absolute children with negative zIndex behind the parent.
+    zIndex: 0,
     elevation: 0,
     backgroundColor: D.bg,
     justifyContent: 'flex-start',
@@ -1349,7 +2127,7 @@ const s = StyleSheet.create({
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
     paddingHorizontal: 20,
   },
-  greeting:    { fontSize: 22, fontWeight: '900', color: '#FFFFFF', letterSpacing: -0.5 },
+  greeting:    { fontSize: 18, fontWeight: '900', color: '#FFFFFF', letterSpacing: -0.2 },
   greetingSub: { fontSize: 12, color: D.muted, fontWeight: '500', marginTop: 2 },
   bellWrap: {
     width: 38, height: 38, borderRadius: 19,
@@ -1362,41 +2140,70 @@ const s = StyleSheet.create({
     backgroundColor: BUILD_GREEN, borderWidth: 1.5, borderColor: D.bg,
   },
 
-  headerMidGroup: {
+  heroArea: {
     flex: 1,
-    justifyContent: 'center',
+    justifyContent: 'space-between',
+    alignItems: 'stretch',
+    paddingVertical: 8,
+  },
+  heroSummaryRow: {
+    flexDirection: 'row',
     alignItems: 'center',
-  },
-  // Rings + metrics — centred
-  heroRow: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-    gap: 42, paddingHorizontal: 16,
-  },
-  metricStack: {
-    height: HERO_S,
-    justifyContent: 'center',
     alignSelf: 'center',
-    marginLeft: HERO_RING_DATA_GAP,
+    paddingVertical: 16,
+    transform: [{ translateY: -10 }, { scale: 1.02 }],
+  },
+  heroRingLeft: {
+    width: 160,
+    height: 160,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  heroRingCentered: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  metricListRight: {
+    flex: 0,
+    paddingLeft: 16,
+    justifyContent: 'center',
+    gap: 12,
+  },
+  metricLabelCompact: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: 'rgba(255,255,255,0.5)',
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
+  },
+  metricValueCompact: {
+    marginTop: 1,
+    fontSize: 13,
+    fontWeight: '600',
+    fontFamily: FONT_MONO as string,
+  },
+  insightWrap: {
+    width: '100%',
+    paddingHorizontal: 20,
+    paddingBottom: 16,
   },
 
   // Insight pill — pinned at base of navy section
   insightPill: {
     flexDirection: 'row', alignItems: 'center', gap: 9,
     alignSelf: 'center',
-    width: 'auto',
-    maxWidth: '92%',
+    width: '100%',
     marginHorizontal: 0,
     marginTop: 0,
     marginBottom: 0,
-    backgroundColor: '#161622',
-    borderRadius: 12,
-    paddingHorizontal: 20, paddingVertical: 12,
-    borderWidth: 1, borderColor: '#2A2A3C',
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    borderRadius: 20,
+    paddingHorizontal: 16, paddingVertical: 10,
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.12)',
   },
   insightSpark: { fontSize: 14, color: VAULT_GOLD },
   insightText:  { flex: 1, fontSize: 13, color: 'rgba(255,255,255,0.9)', fontWeight: '600' },
   insightArrow: { fontSize: 20, color: D.muted, fontWeight: '300' },
-
   // ── Scroll: transparent spacer + sticky sheet + ledger shell ──────────────
   scrollContentTransparent: {
     flexGrow: 1,

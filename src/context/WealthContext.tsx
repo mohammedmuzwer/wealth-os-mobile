@@ -15,7 +15,7 @@ type WealthContextValue = {
   activeDailyBudget: number;
   vaultSweep: number;
   shieldPercentage: number;
-  ovsScore: number;
+  ovrScore: number;
   setTotalIncome: React.Dispatch<React.SetStateAction<number>>;
   setDailySpent: React.Dispatch<React.SetStateAction<number>>;
   setCustomDailyLimit: React.Dispatch<React.SetStateAction<number | null>>;
@@ -80,7 +80,7 @@ export const WealthProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     activeDailyBudget > 0
       ? Math.max(0, ((activeDailyBudget - dailySpent) / activeDailyBudget) * 100)
       : 0;
-  const ovsScore = Math.round(Math.max(0, Math.min(shieldPercentage, 100)));
+  const ovrScore = Math.round(Math.max(0, Math.min(shieldPercentage, 100)));
 
   const value = useMemo(
     () => ({
@@ -96,7 +96,7 @@ export const WealthProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       activeDailyBudget,
       vaultSweep,
       shieldPercentage,
-      ovsScore,
+      ovrScore,
       setTotalIncome,
       setDailySpent,
       setCustomDailyLimit,
@@ -115,7 +115,7 @@ export const WealthProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       activeDailyBudget,
       vaultSweep,
       shieldPercentage,
-      ovsScore,
+      ovrScore,
       setMonthlyAllocationPercent,
     ],
   );
