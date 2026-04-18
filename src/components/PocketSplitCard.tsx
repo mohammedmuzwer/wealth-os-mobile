@@ -35,7 +35,7 @@ type PocketSplitCardProps = {
   unspent: number;
   onPocketNow: () => void;
   onDone: () => Promise<void> | void;
-  pocketButtonRef?: React.RefObject<View>;
+  pocketButtonRef?: React.RefObject<View | null>;
 };
 
 export const PocketSplitCard: React.FC<PocketSplitCardProps> = ({
@@ -102,7 +102,10 @@ export const PocketSplitCard: React.FC<PocketSplitCardProps> = ({
   };
 
   return (
-    <Animated.View style={[{ position: 'absolute', right: rightOffset, height: cardSize, borderRadius: 24 }, wrapperAnimatedStyle]}>
+    <Animated.View
+      pointerEvents="box-none"
+      style={[{ position: 'absolute', right: rightOffset, height: cardSize, borderRadius: 24 }, wrapperAnimatedStyle]}
+    >
       <Animated.View style={[styles.face, frontAnimatedStyle]}>
         <Pressable style={({ pressed }) => [styles.frontCard, pressed && styles.frontCardPressed]} onPress={openFlip}>
           <View style={styles.frontTop}>
@@ -140,26 +143,32 @@ export const PocketSplitCard: React.FC<PocketSplitCardProps> = ({
           </View>
 
           <View style={styles.sliderSection}>
-            <Slider
-              style={styles.slider}
-              minimumValue={10}
-              maximumValue={90}
-              step={5}
-              value={safeSplit}
-              onValueChange={(val) => {
-                const next = Math.round(Number(val));
-                setPocketSplitPct(next);
-                console.log('pocketSplitPct changed to:', val);
+            <View
+              onStartShouldSetResponder={() => true}
+              onTouchStart={e => {
+                e.stopPropagation?.();
               }}
-              onSlidingComplete={(val) => {
-                const next = Math.round(Number(val));
-                setPocketSplitPct(next);
-                console.log('pocketSplitPct sliding complete:', next);
-              }}
-              minimumTrackTintColor={VIOLET}
-              maximumTrackTintColor={TRACK_MAX}
-              thumbTintColor={VIOLET_LIGHT}
-            />
+            >
+              <Slider
+                style={styles.slider}
+                minimumValue={10}
+                maximumValue={90}
+                step={5}
+                value={safeSplit}
+                tapToSeek
+                onValueChange={val => {
+                  const next = Math.round(Number(val));
+                  setPocketSplitPct(next);
+                }}
+                onSlidingComplete={val => {
+                  const next = Math.round(Number(val));
+                  setPocketSplitPct(next);
+                }}
+                minimumTrackTintColor={VIOLET}
+                maximumTrackTintColor="rgba(255,255,255,0.2)"
+                thumbTintColor={VIOLET_LIGHT}
+              />
+            </View>
           </View>
 
           <View style={styles.amountRow}>
@@ -306,7 +315,7 @@ const styles = StyleSheet.create({
     marginTop: 4,
     marginBottom: 0,
   },
-  slider: { width: '100%', height: 34, zIndex: 1 },
+  slider: { width: '100%', height: 40, zIndex: 1 },
   amountRow: {
     marginTop: 4,
     flexDirection: 'row',

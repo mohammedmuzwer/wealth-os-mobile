@@ -104,7 +104,10 @@ export const DailyBudgetCard: React.FC<DailyBudgetCardProps> = ({
   });
 
   return (
-    <Animated.View style={[{ position: 'absolute', left: leftOffset, height: cardSize, borderRadius: 24 }, wrapperAnimatedStyle]}>
+    <Animated.View
+      pointerEvents="box-none"
+      style={[{ position: 'absolute', left: leftOffset, height: cardSize, borderRadius: 24 }, wrapperAnimatedStyle]}
+    >
         <Animated.View style={[styles.face, frontAnimatedStyle]}>
           <Pressable
             style={({ pressed }) => [styles.budgetCard, pressed && styles.budgetCardPressed]}
@@ -162,16 +165,25 @@ export const DailyBudgetCard: React.FC<DailyBudgetCardProps> = ({
                   pointerEvents="none"
                   style={[styles.criticalMarker, { left: `${markerPct * 100}%` }]}
                 />
-                <Slider
-                  style={styles.slider}
-                  minimumValue={0}
-                  maximumValue={computedSliderMax}
-                  value={dailyLimit}
-                  onValueChange={val => setDailyLimit(val)}
-                  minimumTrackTintColor={VIOLET}
-                  maximumTrackTintColor={TRACK_MAX}
-                  thumbTintColor={VIOLET_LIGHT}
-                />
+                <View
+                  onStartShouldSetResponder={() => true}
+                  onTouchStart={e => {
+                    e.stopPropagation?.();
+                  }}
+                >
+                  <Slider
+                    style={styles.slider}
+                    minimumValue={0}
+                    maximumValue={computedSliderMax}
+                    value={dailyLimit}
+                    tapToSeek
+                    onValueChange={val => setDailyLimit(val)}
+                    onSlidingComplete={val => setDailyLimit(val)}
+                    minimumTrackTintColor={VIOLET}
+                    maximumTrackTintColor={TRACK_MAX}
+                    thumbTintColor={VIOLET_LIGHT}
+                  />
+                </View>
               </View>
             </View>
           </View>
@@ -329,7 +341,7 @@ const styles = StyleSheet.create({
     opacity: 0.95,
     zIndex: 0,
   },
-  slider: { width: '100%', height: 34, zIndex: 1 },
+  slider: { width: '100%', height: 40, zIndex: 1 },
   doneBtn: {
     width: '100%',
     height: 40,

@@ -1,10 +1,7 @@
 ﻿/**
  * HomeScreen.tsx
- * Navy hero (fixed) + scroll layer with transparent spacer → sticky white header → ledger.
- *
- * Scroll architecture: index 0 = transparent spacer = navy band height minus curve overlap
- * (30% screen ≈ visible rings on load); index 1 = sticky white sheet (~70% region); index 2 = list.
- * Scroll-driven UI band ≈ 20% screen height.
+ * Navy top section (~34% screen height) with header, rings, and labels; white card below
+ * with scrollable insight, budget / pocket strips, recent activity, and floating tab bar.
  */
 
 import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
@@ -12,27 +9,25 @@ import {
   View, Text, StyleSheet,
   StatusBar, TouchableOpacity, Animated, Easing, useWindowDimensions, Dimensions,
   Modal, Pressable, TextInput, Switch, Platform, PanResponder, RefreshControl,
-  AppState, type AppStateStatus,
+  AppState, type AppStateStatus, ScrollView,
 } from 'react-native';
-import { MaterialIcons } from '@expo/vector-icons';
+import Slider from '@react-native-community/slider';
+import Reanimated, { useSharedValue, useAnimatedStyle, withSpring } from 'react-native-reanimated';
+import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import Svg, { Circle, G } from 'react-native-svg';
+import Svg, { Circle } from 'react-native-svg';
 import { useFinancials } from '../hooks/useFinancials';
 import { useWealth } from '../context/WealthContext';
-import { DailyBudgetCard } from '../components/DailyBudgetCard';
-import { PocketSplitCard } from '../components/PocketSplitCard';
-import { NAVY_SECTION_RATIO } from '../constants/pageLayout';
-import { MoreScreen } from './MoreScreen';
 import { IncomeEngineScreen } from './IncomeEngineScreen';
 import { WealthScreen } from './WealthScreen';
+import { MoreScreen } from './MoreScreen';
 import { updateUserSettingsFirestoreRecord } from '../services/incomeHistorySync';
 import {
   SHIELD_RED, BUILD_GREEN, VAULT_GOLD, PURPLE, NAVY,
   TEXT_PRIMARY, TEXT_MUTED,
-  getTierColor, getTierLabel,
-  FONT_MONO, RADIUS_LG, RADIUS_PILL,
+  FONT_MONO, FONT_UI, RADIUS_LG, RADIUS_PILL,
 } from '../theme/tokens';
 import { fmt, type Expense, type ExpenseCategory } from '../utils/finance';
 
@@ -78,18 +73,10 @@ const D = {
   card:  '#161B27',
   muted: 'rgba(255,255,255,0.42)',
 };
-const TEAL         = '#22D3EE';
-const CYBER_YELLOW = '#FFD700';
-
 // ─── Layout constants ─────────────────────────────────────────────────────────
-const HERO_S    = 170;
-const HERO_GAP  = 2;     // crisp visual ring gap
-const HERO_RING_DATA_GAP = Math.round(HERO_S * 0.2375);
 const CURVE     = 28;    // white section overlaps navy by this many px
 const WHITE_PAD = 20;
 const CARD_GAP  = 12;
-const HOME_CARD_SCALE = 0.98;
-
 
 /** Scroll distance (px) for expand/collapse animations ≈ 20% of screen height */
 const scrollAnimSpanPx = (screenH: number) =>
@@ -132,7 +119,6 @@ const AnimatedCircle = Animated.createAnimatedComponent(Circle);
 // ─── Hero Rings ───────────────────────────────────────────────────────────────
 
 interface HeroRingsProps {
-  buildPercentage: number;
   score: number;
   shieldCircumference: number;
   shieldOffset: number;
@@ -140,12 +126,20 @@ interface HeroRingsProps {
   trackCircumference: number;
   trackOffset: number;
   trackColor: string;
+  pocketCircumference: number;
+  pocketOffset: number;
+  pocketColor: string;
   isLocked: boolean;
-  buildColor: string;
 }
 
+const RING_SVG = 180;
+const RING_C = 90;
+const R_SHIELD = 78;
+const R_TRACK = 59;
+const R_POCKET = 40;
+const RING_STROKE = 15;
+
 const HeroRings: React.FC<HeroRingsProps> = React.memo(({
-  buildPercentage,
   score,
   shieldCircumference,
   shieldOffset,
@@ -153,27 +147,26 @@ const HeroRings: React.FC<HeroRingsProps> = React.memo(({
   trackCircumference,
   trackOffset,
   trackColor,
+  pocketCircumference,
+  pocketOffset,
+  pocketColor,
   isLocked,
-  buildColor,
 }) => {
-  const S = HERO_S;
-  const cx = S / 2;
-  const cy = S / 2;
-  const rO = 64;
-  const rM = 50;
-  const rI = 36;
-  const tierColor = getTierColor(score);
-  const tierLabel = getTierLabel(score);
+  const tier = useMemo(() => {
+    if (score <= 59) return { color: '#FF3B5C', label: 'AT RISK' };
+    if (score <= 74) return { color: '#8888AA', label: 'STABLE' };
+    if (score <= 84) return { color: '#00B4FF', label: 'GROWING' };
+    if (score <= 94) return { color: '#38A169', label: 'STRONG' };
+    return { color: '#FFAA00', label: 'ELITE' };
+  }, [score]);
   const pulse = useRef(new Animated.Value(1)).current;
   const animatedShieldOffset = useRef(new Animated.Value(shieldOffset)).current;
   const animatedTrackOffset = useRef(new Animated.Value(trackOffset)).current;
-  const buildCircumference = 2 * Math.PI * rI;
-  const initialBuildOffset = buildCircumference - Math.min(Math.max(buildPercentage, 0), 1) * buildCircumference;
-  const animatedBuildOffset = useRef(new Animated.Value(initialBuildOffset)).current;
+  const animatedPocketOffset = useRef(new Animated.Value(pocketOffset)).current;
   const prevShieldOffset = useRef(shieldOffset);
   const prevTrackOffset = useRef(trackOffset);
-  const prevBuildOffset = useRef(initialBuildOffset);
-  const prev  = useRef(score);
+  const prevPocketOffset = useRef(pocketOffset);
+  const prevScoreRef = useRef(score);
 
   useEffect(() => {
     const isDrain = shieldOffset <= prevShieldOffset.current;
@@ -198,81 +191,147 @@ const HeroRings: React.FC<HeroRingsProps> = React.memo(({
   }, [animatedTrackOffset, trackOffset]);
 
   useEffect(() => {
-    const nextBuildOffset = buildCircumference - Math.min(Math.max(buildPercentage, 0), 1) * buildCircumference;
-    const isDrain = nextBuildOffset <= prevBuildOffset.current;
-    Animated.timing(animatedBuildOffset, {
-      toValue: nextBuildOffset,
+    const isDrain = pocketOffset <= prevPocketOffset.current;
+    Animated.timing(animatedPocketOffset, {
+      toValue: pocketOffset,
       duration: isDrain ? 150 : 220,
       easing: Easing.out(Easing.cubic),
       useNativeDriver: false,
     }).start();
-    prevBuildOffset.current = nextBuildOffset;
-  }, [animatedBuildOffset, buildCircumference, buildPercentage]);
+    prevPocketOffset.current = pocketOffset;
+  }, [animatedPocketOffset, pocketOffset]);
 
   useEffect(() => {
-    if (prev.current !== score) {
-      prev.current = score;
+    if (prevScoreRef.current !== score) {
+      prevScoreRef.current = score;
       Animated.sequence([
         Animated.spring(pulse, { toValue: 1.2, useNativeDriver: true, speed: 40 }),
         Animated.spring(pulse, { toValue: 1.0, useNativeDriver: true, speed: 40 }),
       ]).start();
     }
   }, [score]);
-  return (
-    <View style={{ width: S, height: S }}>
-      <Svg width={S} height={S} viewBox={`0 0 ${S} ${S}`}>
-        {/* --- OUTER RING: RED SHIELD --- */}
-        {/* 1. The Faded Background Track */}
-        <Circle cx="85" cy="85" r="64" stroke="rgba(255,255,255,0.08)" strokeWidth="10" fill="none" />
 
-        {/* 2. The Dynamic Progress Ring (With Crash Guards) */}
+  const dash = (c: number) => String(c);
+
+  return (
+    <View style={{ width: RING_SVG, height: RING_SVG }}>
+      <Svg width={RING_SVG} height={RING_SVG} viewBox={`0 0 ${RING_SVG} ${RING_SVG}`}>
+        <Circle
+          cx={RING_C}
+          cy={RING_C}
+          r={R_SHIELD}
+          stroke="#FF3B5C"
+          strokeOpacity={0.15}
+          strokeWidth={RING_STROKE}
+          fill="none"
+        />
+        <Circle
+          cx={RING_C}
+          cy={RING_C}
+          r={R_TRACK}
+          stroke="#00B4FF"
+          strokeOpacity={0.15}
+          strokeWidth={RING_STROKE}
+          fill="none"
+        />
+        <Circle
+          cx={RING_C}
+          cy={RING_C}
+          r={R_POCKET}
+          stroke="#FFAA00"
+          strokeOpacity={0.15}
+          strokeWidth={RING_STROKE}
+          fill="none"
+        />
         <AnimatedCircle
-          cx="85"
-          cy="85"
-          r={rO}
+          cx={RING_C}
+          cy={RING_C}
+          r={R_SHIELD}
           stroke={shieldColor}
-          strokeWidth="10"
+          strokeOpacity={0.3}
+          strokeWidth={22}
           fill="none"
           strokeLinecap="round"
-          strokeDasharray={shieldCircumference}
+          strokeDasharray={dash(shieldCircumference)}
           strokeDashoffset={animatedShieldOffset}
           rotation="-90"
-          originX="85"
-          originY="85"
+          originX={RING_C}
+          originY={RING_C}
         />
-        {/* TRACK background */}
-        <Circle cx="85" cy="85" r="50" stroke="rgba(255,255,255,0.08)" strokeWidth="10" fill="none" />
-        {/* TRACK progress */}
         <AnimatedCircle
-          cx="85"
-          cy="85"
-          r={rM}
-          stroke={trackColor}
-          strokeWidth="10"
+          cx={RING_C}
+          cy={RING_C}
+          r={R_SHIELD}
+          stroke={shieldColor}
+          strokeOpacity={1}
+          strokeWidth={RING_STROKE}
           fill="none"
           strokeLinecap="round"
-          strokeDasharray={trackCircumference}
+          strokeDasharray={dash(shieldCircumference)}
+          strokeDashoffset={animatedShieldOffset}
+          rotation="-90"
+          originX={RING_C}
+          originY={RING_C}
+        />
+        <AnimatedCircle
+          cx={RING_C}
+          cy={RING_C}
+          r={R_TRACK}
+          stroke={trackColor}
+          strokeOpacity={0.3}
+          strokeWidth={22}
+          fill="none"
+          strokeLinecap="round"
+          strokeDasharray={dash(trackCircumference)}
           strokeDashoffset={isNaN(trackOffset) ? trackCircumference : animatedTrackOffset}
           rotation="-90"
-          originX="85"
-          originY="85"
+          originX={RING_C}
+          originY={RING_C}
         />
-        {/* BUILD background */}
-        <Circle cx="85" cy="85" r="36" stroke="rgba(255,255,255,0.08)" strokeWidth="10" fill="none" />
-        {/* BUILD progress */}
         <AnimatedCircle
-          cx="85"
-          cy="85"
-          r={rI}
-          stroke={buildColor}
-          strokeWidth="10"
+          cx={RING_C}
+          cy={RING_C}
+          r={R_TRACK}
+          stroke={trackColor}
+          strokeOpacity={1}
+          strokeWidth={RING_STROKE}
           fill="none"
           strokeLinecap="round"
-          strokeDasharray={buildCircumference}
-          strokeDashoffset={animatedBuildOffset}
+          strokeDasharray={dash(trackCircumference)}
+          strokeDashoffset={isNaN(trackOffset) ? trackCircumference : animatedTrackOffset}
           rotation="-90"
-          originX="85"
-          originY="85"
+          originX={RING_C}
+          originY={RING_C}
+        />
+        <AnimatedCircle
+          cx={RING_C}
+          cy={RING_C}
+          r={R_POCKET}
+          stroke={pocketColor}
+          strokeOpacity={0.3}
+          strokeWidth={22}
+          fill="none"
+          strokeLinecap="round"
+          strokeDasharray={dash(pocketCircumference)}
+          strokeDashoffset={animatedPocketOffset}
+          rotation="-90"
+          originX={RING_C}
+          originY={RING_C}
+        />
+        <AnimatedCircle
+          cx={RING_C}
+          cy={RING_C}
+          r={R_POCKET}
+          stroke={pocketColor}
+          strokeOpacity={1}
+          strokeWidth={RING_STROKE}
+          fill="none"
+          strokeLinecap="round"
+          strokeDasharray={dash(pocketCircumference)}
+          strokeDashoffset={animatedPocketOffset}
+          rotation="-90"
+          originX={RING_C}
+          originY={RING_C}
         />
       </Svg>
       <View style={rg.centre}>
@@ -280,9 +339,8 @@ const HeroRings: React.FC<HeroRingsProps> = React.memo(({
           <Text style={rg.lockIcon}>🔒</Text>
         ) : (
           <>
-            <Animated.Text style={[rg.score, { color: tierColor, transform: [{ scale: pulse }] }]}>{score}</Animated.Text>
-            <Text style={[rg.ovrLabel, { color: tierColor }]}>OVR</Text>
-            <Text style={[rg.tier, { color: tierColor }]}>{tierLabel}</Text>
+            <Animated.Text style={[rg.score, { transform: [{ scale: pulse }] }]}>{score}</Animated.Text>
+            <Text style={[rg.tier, { color: tier.color }]}>{tier.label}</Text>
           </>
         )}
       </View>
@@ -292,68 +350,18 @@ const HeroRings: React.FC<HeroRingsProps> = React.memo(({
 
 const rg = StyleSheet.create({
   centre: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' },
-  score:  { fontSize: 32, lineHeight: 34, fontWeight: '700', letterSpacing: -1, fontFamily: FONT_MONO as string },
-  ovrLabel: { fontSize: 10, lineHeight: 12, fontWeight: '700', letterSpacing: 1, marginTop: 1 },
-  tier:   { fontSize: 11, lineHeight: 14, fontWeight: '800', letterSpacing: 1, marginTop: 2 },
-  lockIcon: { fontSize: 28, lineHeight: 32 },
-});
-
-// ─── Metric Badge ─────────────────────────────────────────────────────────────
-
-const MetricBadge: React.FC<{ icon: string; label: string; value: string; color: string }> =
-  ({ label, value, color }) => (
-    <View style={mb.row}>
-      <View>
-        <Text style={mb.label}>{label}</Text>
-        <Text style={[mb.value, { color }]}>{value}</Text>
-      </View>
-    </View>
-  );
-
-const mb = StyleSheet.create({
-  row:   { minHeight: Math.round((HERO_S / 3) * 0.9), justifyContent: 'center' },
-  label: { fontSize: 12, fontWeight: '600', color: '#E5E7EB', letterSpacing: 0.6, textTransform: 'uppercase' },
-  value: {
-    fontSize: 19,
-    lineHeight: 22,
-    fontWeight: '600',
-    letterSpacing: -0.3,
+  score: {
+    fontSize: 28,
+    lineHeight: 30,
+    fontWeight: '700',
+    letterSpacing: -0.5,
     fontFamily: FONT_MONO as string,
-    minWidth: 132,
+    color: '#FFFFFF',
+    includeFontPadding: false,
   },
+  tier: { fontSize: 8, lineHeight: 10, fontWeight: '800', letterSpacing: 1.2, marginTop: 2, textTransform: 'uppercase', includeFontPadding: false },
+  lockIcon: { fontSize: 24, lineHeight: 28 },
 });
-
-// ─── Budget Arc ───────────────────────────────────────────────────────────────
-
-const BudgetArc: React.FC<{ size: number; progress: number }> = ({ size, progress }) => {
-  const r = size / 2 - 7; const circ = 2 * Math.PI * r;
-  const cx = size / 2; const cy = size / 2;
-  const normalized = Math.max(0, Math.min(progress, 1));
-  const fill = circ * (1 - normalized);
-  return (
-    <Svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
-      <G rotation="-90" origin={`${cx},${cy}`}>
-        <Circle cx={cx} cy={cy} r={r} stroke={TEAL} strokeWidth={10} strokeOpacity={0.18} fill="none" />
-        <Circle cx={cx} cy={cy} r={r} stroke={TEAL} strokeWidth={10}
-          strokeLinecap="round" strokeDasharray={circ} strokeDashoffset={fill} fill="none" />
-      </G>
-    </Svg>
-  );
-};
-
-// ─── Nav Item ─────────────────────────────────────────────────────────────────
-
-const NavItem: React.FC<{ icon: keyof typeof MaterialIcons.glyphMap; label: string; active: boolean; onPress: () => void }> =
-  ({ icon, label, active, onPress }) => (
-    <TouchableOpacity
-      style={[s.navItem, active && s.navItemActiveGlass]}
-      onPress={onPress}
-      activeOpacity={0.7}
-    >
-      <MaterialIcons name={icon} size={20} style={[s.navIcon, active && s.navIconActive]} />
-      <Text style={[s.navLabel, active && s.navLabelActive]}>{label}</Text>
-    </TouchableOpacity>
-  );
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -383,6 +391,12 @@ const parseIncomeAmount = (amount: string | number): number => {
   }
   return Number(amount.replace(/,/g, '').trim()) || 0;
 };
+
+const snapPocketSplit = (n: number) =>
+  Math.round(Math.max(10, Math.min(90, Math.round(n))) / 5) * 5;
+
+/** Shared spring for strip heights + pocket button scale */
+const STRIP_SPRING = { damping: 16, stiffness: 120, mass: 0.8 };
 
 const EXPENSE_LOG_KEY = 'wos_expense_log';
 const INCOME_SOURCES_KEY = 'income_engine_sources_v1';
@@ -444,37 +458,6 @@ const getFirestoreString = (field: any): string | null => {
   return null;
 };
 
-const hexToRgb = (hex: string) => {
-  const clean = hex.replace('#', '');
-  const full = clean.length === 3
-    ? clean.split('').map(ch => ch + ch).join('')
-    : clean;
-  const value = parseInt(full, 16);
-  return {
-    r: (value >> 16) & 255,
-    g: (value >> 8) & 255,
-    b: value & 255,
-  };
-};
-
-const mixHex = (fromHex: string, toHex: string, t: number) => {
-  const from = hexToRgb(fromHex);
-  const to = hexToRgb(toHex);
-  const n = Math.max(0, Math.min(1, t));
-  const r = Math.round(from.r + (to.r - from.r) * n);
-  const g = Math.round(from.g + (to.g - from.g) * n);
-  const b = Math.round(from.b + (to.b - from.b) * n);
-  return `rgb(${r}, ${g}, ${b})`;
-};
-
-const getSmoothShieldColor = (percent: number) => {
-  const p = Math.max(0, Math.min(1, percent));
-  if (p <= 0.1) return '#888888';
-  if (p <= 0.3) return mixHex('#888888', '#FF6B00', (p - 0.1) / 0.2);
-  if (p <= 0.5) return mixHex('#FF6B00', '#D69E2E', (p - 0.3) / 0.2);
-  return mixHex('#D69E2E', '#E53E3E', (p - 0.5) / 0.5);
-};
-
 const getInactivityTimeout = (level: number) => {
   if (level <= 2) return 10000;
   if (level <= 4) return 20000;
@@ -484,8 +467,10 @@ const getInactivityTimeout = (level: number) => {
 const EXPENSE_UI_MAP: Record<ExpenseCategory, { emoji: string; iconBg: string; label: string }> = {
   food: { emoji: '🍔', iconBg: '#FEF3E8', label: 'Food' },
   petrol: { emoji: '⛽', iconBg: '#F0E8FE', label: 'Transport' },
-  utilities: { emoji: '📱', iconBg: '#E8E8FE', label: 'Utilities' },
   shopping: { emoji: '🛒', iconBg: '#FEE8F0', label: 'Shopping' },
+  family: { emoji: '👪', iconBg: '#E8F8F0', label: 'Family' },
+  friends: { emoji: '👥', iconBg: '#E8F0FE', label: 'Friends' },
+  medical: { emoji: '⚕️', iconBg: '#FEE8F0', label: 'Medical' },
   other: { emoji: '🧾', iconBg: '#E8F0FE', label: 'Other' },
 };
 
@@ -500,9 +485,11 @@ export const HomeScreen: React.FC = () => {
     criticalDailyLimit,
     todayDynamicBudget,
     ovrScore,
+    monthlyAllocationPercent,
     setTotalIncome,
     setDailySpent,
     setCustomDailyLimit,
+    setMonthlyAllocationPercent,
   } = useWealth();
 
   const [currentTime, setCurrentTime] = useState(new Date());
@@ -556,7 +543,7 @@ export const HomeScreen: React.FC = () => {
     console.log('incomeConfirmedAt:', incomeConfirmedAt);
   }, [salaryConfirmed, effectiveDailyBudget, incomeConfirmedAt]);
 
-  const shieldRadius = 64;
+  const shieldRadius = R_SHIELD;
   const shieldCircumference = 2 * Math.PI * shieldRadius;
   const totalMinutesNow = now.getHours() * 60 + now.getMinutes();
   const entryScale = [0, 1, 2, 4, 8, 12, 18, 22, 26, 30, 35];
@@ -569,18 +556,18 @@ export const HomeScreen: React.FC = () => {
   const entryProgress = Math.min(trackData.entriesToday / requiredLogs, 1);
   const trackPercentage = !isIncomeConfirmed ? 0 : (timeProgress + entryProgress) / 2;
   const trackPercent = Math.round(trackPercentage * 100);
-  const trackRadius = 50;
+  const trackRadius = R_TRACK;
   const trackCircumference = 2 * Math.PI * trackRadius;
   const trackOffset = trackCircumference - trackPercentage * trackCircumference;
-  const trackColor = !isIncomeConfirmed
-    ? '#888888'
-    : trackPercentage >= 1
-    ? '#63B3ED'
-    : '#3182CE';
+  const shieldRingColor = '#FF3B5C';
+  const trackRingColor = '#00B4FF';
+  const pocketRingColor = '#FFAA00';
+  const trackColor = trackRingColor;
   const safePocketSplitPct = Number.isFinite(pocketSplitPct) ? Math.max(10, Math.min(90, Math.round(pocketSplitPct))) : 50;
   const unspent = Math.max(0, activeDailyBudget - dailySpent);
   const pocketAmount = unspent * (safePocketSplitPct / 100);
   const pocketDisplay = Number.isFinite(pocketAmount) ? Math.max(0, Math.floor(pocketAmount)) : 0;
+  const pocketAvailable = pocketDisplay;
   const healDisplay = Math.floor(unspent * ((100 - safePocketSplitPct) / 100));
   const pocketGoal = pocketAmount;
   const buildPercentage = !isIncomeConfirmed
@@ -588,11 +575,11 @@ export const HomeScreen: React.FC = () => {
     : pocketGoal > 0
     ? Math.min(vaultSummary.pocketedToday / pocketGoal, 1)
     : 0;
-  const buildColor = !isIncomeConfirmed
-    ? '#888888'
-    : buildPercentage >= 1
-    ? '#68D391'
-    : '#38A169';
+  const buildColor = pocketRingColor;
+
+  const pocketRingRadius = R_POCKET;
+  const pocketCircumference = 2 * Math.PI * pocketRingRadius;
+  const pocketOffset = pocketCircumference - buildPercentage * pocketCircumference;
 
   useEffect(() => {
     console.log('pocketedToday:', vaultSummary.pocketedToday);
@@ -638,7 +625,8 @@ export const HomeScreen: React.FC = () => {
 
   let shieldPercentage = 0;
   let shieldOffset = shieldCircumference;
-  let shieldColor = '#888888';
+  const isShieldBroken = isIncomeConfirmed && activeDailyBudget > 0 && effectiveDailySpent > activeDailyBudget;
+  let shieldColor = isShieldBroken ? '#333333' : shieldRingColor;
 
   if (isIncomeConfirmed) {
     const confirmedToday = incomeConfirmedAt ? isSameDay(incomeConfirmedAt, now) : false;
@@ -654,7 +642,7 @@ export const HomeScreen: React.FC = () => {
 
     shieldPercentage = Math.max(0, timePercent - spendPercent);
     shieldOffset = shieldCircumference - shieldPercentage * shieldCircumference;
-    shieldColor = getSmoothShieldColor(shieldPercentage);
+    shieldColor = isShieldBroken ? '#333333' : shieldRingColor;
   }
   const shieldPts = Math.max(0, Math.min(shieldPercentage, 1)) * 20;
   const trackPts = Math.max(0, Math.min(trackPercentage, 1)) * 10;
@@ -662,28 +650,52 @@ export const HomeScreen: React.FC = () => {
   const microScore = shieldPts + trackPts + buildPts;
   const computedOvrScore = Math.round(Math.min(microScore + (firestoreMacroScore ?? 30), 100));
   const heroOvrScore = firestoreOvrScore ?? computedOvrScore;
-  const currentInsight = '₹1,200 more this week for MacBook';
-  const insightText = !isIncomeConfirmed ? 'Confirm your income to start' : currentInsight;
-  const insightIcon = !isIncomeConfirmed ? '🔒' : '✦';
+  const getInsight = useCallback(() => {
+    const hour = new Date().getHours();
+    console.log('=== INSIGHT CHECK ===');
+    console.log('dailySpent:', dailySpent);
+    console.log('activeDailyBudget:', activeDailyBudget);
+    console.log('hour:', hour);
+
+    // Temporary isolate: only overspend condition enabled.
+    if (activeDailyBudget > 0 && dailySpent > activeDailyBudget) {
+      return {
+        icon: '⚠',
+        text: 'Budget exceeded today',
+        color: '#FF3B5C',
+        bg: 'rgba(255,59,92,0.1)',
+        border: 'rgba(255,59,92,0.2)',
+        action: 'Spend' as const,
+      };
+    }
+
+    return null;
+  }, [activeDailyBudget, dailySpent]);
+  const insight = useMemo(() => getInsight(), [getInsight]);
   const { width: screenWidth, height: screenHeight } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
-  const HEADER_HEIGHT = SCREEN_HEIGHT * NAVY_SECTION_RATIO;
-  const CARD_ROW_WIDTH = SCREEN_WIDTH - 40;
-  const CARD_SIZE = CARD_ROW_WIDTH * 0.48 * 0.9025 * HOME_CARD_SCALE;
-  const CARD_CENTER_GAP = CARD_ROW_WIDTH * 0.03;
-  const CARD_ROW_SIDE_MARGIN = Math.max(
-    0,
-    (CARD_ROW_WIDTH - CARD_SIZE * 2 - CARD_CENTER_GAP) / 2,
-  );
+  const NAVY_HEIGHT = SCREEN_HEIGHT * 0.342;
+  const minimizedTop = Math.round(NAVY_HEIGHT);
+  /** SafeAreaView already applies top inset — align with Wealth/IE “peek” sheet, not double-count safe area. */
+  const expandedTop = 8;
+  const SIDE_MARGIN = Math.round(SCREEN_WIDTH * 0.08);
+
+  const homeSheetTop = useRef(new Animated.Value(minimizedTop)).current;
+  const homeSheetPanStartRef = useRef(minimizedTop);
+  const homeSheetCurrentTopRef = useRef(minimizedTop);
+  /** Mirrors `homeSheetTop` for gesture checks without reading private Animated APIs. */
+  const homeSheetTopTrackedRef = useRef(minimizedTop);
   const scrollY = useRef(new Animated.Value(0)).current;
   const scrollYValueRef = useRef(0);
   /** Let expanded activity tabs receive touches only when sheet is scrolled up (opacity > 0). */
-  const [sheetExpandedForInput, setSheetExpandedForInput] = useState(false);
-
-  const [activeTab, setActiveTab] = useState<TabKey>('Daily');
+  const [activityTabUi, setActivityTabUi] = useState<TabKey>('Daily');
   const [activeNav, setActiveNav] = useState<NavKey>('home');
-  const [activeRootTab, setActiveRootTab] = useState<'Home' | 'More' | 'IncomeEngine' | 'Wealth'>('Home');
+  const [activeRootTab, setActiveRootTab] = useState<'Home' | 'IncomeEngine' | 'Wealth' | 'More'>('Home');
+  const [sheetActivePanel, setSheetActivePanel] = useState<'budget' | 'pocket' | null>(null);
+  const [confirmedIncomeForBudget, setConfirmedIncomeForBudget] = useState(0);
+  const [pocketSplitDraft, setPocketSplitDraft] = useState(50);
+  const [localAutoMode, setLocalAutoMode] = useState(true);
   const [incomeActivity, setIncomeActivity] = useState<IncomeSourceLog[]>([]);
   const [expenseActivity, setExpenseActivity] = useState<Expense[]>([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -850,6 +862,7 @@ export const HomeScreen: React.FC = () => {
         if (userId && mounted) setFirestoreUserId(userId);
         if (!FIRESTORE_PROJECT_ID || !userId) {
           if (mounted) {
+            setConfirmedIncomeForBudget(totalIncome);
             setShieldSettings({
               activeDailyBudget,
               salaryConfirmed: localSalaryConfirmed,
@@ -920,6 +933,7 @@ export const HomeScreen: React.FC = () => {
         console.log('shield/settings activeDailyBudget parsed:', activeDailyBudgetParsed);
         console.log('shield/settings incomeConfirmedAt parsed:', incomeConfirmedAtParsed);
         if (!mounted) return;
+        setConfirmedIncomeForBudget(confirmedIncome);
         setShieldSettings({
           activeDailyBudget: Number.isFinite(computedDailyBudget) ? computedDailyBudget : (activeDailyBudgetParsed ?? activeDailyBudget),
           salaryConfirmed: salaryConfirmedParsed ?? localSalaryConfirmed,
@@ -930,11 +944,12 @@ export const HomeScreen: React.FC = () => {
         console.log('allocationPct:', allocationPctParsed);
         console.log('monthlyPool:', monthlyPool);
         console.log('dailyBudget:', computedDailyBudget);
-        setPocketSplitPct(
-          pocketSplitParsed !== null
-            ? Math.max(10, Math.min(90, Math.round(pocketSplitParsed)))
-            : 50,
-        );
+        const nextPocket = pocketSplitParsed !== null
+          ? Math.max(10, Math.min(90, Math.round(pocketSplitParsed)))
+          : 50;
+        setPocketSplitPct(nextPocket);
+        setPocketSplitDraft(nextPocket);
+        setMonthlyAllocationPercent(Math.max(1, Math.min(50, Math.round(allocationPctParsed))));
         const macroFromDaily =
           getFirestoreNumber(scoreFields.macroScore) ??
           getFirestoreNumber(scoreFields.macro_score);
@@ -1088,88 +1103,26 @@ export const HomeScreen: React.FC = () => {
   }, [isIncomeConfirmed, startTicking, stopTicking]);
 
   useEffect(() => {
-    const thr = 72 * sk;
     const id = scrollY.addListener(({ value }) => {
       scrollYValueRef.current = value;
-      const next = value > thr;
-      setSheetExpandedForInput(prev => (prev === next ? prev : next));
     });
     return () => scrollY.removeListener(id);
-  }, [scrollY, screenHeight, sk]);
+  }, [scrollY]);
 
-  const squareOpacity = scrollY.interpolate({
-    inputRange: [0, 70 * sk, sa],
-    outputRange: [1, 0.45, 0],
-    extrapolate: 'clamp',
-  });
-  const squareTranslateY = scrollY.interpolate({
-    inputRange: [0, sa],
-    outputRange: [0, -10],
-    extrapolate: 'clamp',
-  });
-  const expandedOpacity = scrollY.interpolate({
-    inputRange: [25 * sk, 80 * sk, sa],
-    outputRange: [0, 0.9, 1],
-    extrapolate: 'clamp',
-  });
-  const expandedTranslateY = scrollY.interpolate({
-    inputRange: [25 * sk, sa],
-    outputRange: [14, 0],
-    extrapolate: 'clamp',
-  });
-  const activityHeaderOpacity = scrollY.interpolate({
-    inputRange: [0, 70 * sk, sa],
-    outputRange: [1, 0.45, 0],
-    extrapolate: 'clamp',
-  });
   const footerTranslateY = scrollY.interpolate({
     inputRange: [0, 100 * sk],
     outputRange: [0, 150],
     extrapolate: 'clamp',
   });
 
-  /** White wash under scroll layer — fixed height, opacity only (avoids layout thrash while scrolling). */
-  const expandTopWashOpacity = scrollY.interpolate({
-    inputRange: [20 * sk, 85 * sk],
-    outputRange: [0, 1],
-    extrapolate: 'clamp',
-  });
+  const onWhiteCardScroll = useMemo(
+    () =>
+      Animated.event([{ nativeEvent: { contentOffset: { y: scrollY } } }], {
+        useNativeDriver: false,
+      }),
+    [scrollY],
+  );
 
-  const cardSize = Math.round(CARD_SIZE);
-  const arcSize  = Math.round(cardSize * 0.3);
-  const dailyBudgetProgress = dailyLimit > 0 ? dailySpent / dailyLimit : 0;
-
-  /** Expanded: pull ledger up under absolute filters (layout phantom from faded grid). Not animated. */
-  const txListOverlapExpanded = Math.round(cardSize + SHEET_SECTION_GAP * 2 + 28);
-  /** Expanded-only inset so first transactions start below sticky tabs instead of hiding under them. */
-  const txListExpandedTopInset = Math.round(EXPANDED_ACTIVITY_TOP + 196);
-
-  const METRICS = [
-    {
-      icon: '🛡️',
-      label: 'Shield',
-      value: !isIncomeConfirmed ? '₹0 / –' : `₹${effectiveDailySpent.toFixed(0)} / ${effectiveDailyBudget.toFixed(0)}`,
-      color: !isIncomeConfirmed ? '#888888' : shieldColor,
-    },
-    {
-      icon: '🎯',
-      label: 'Track',
-      value: !isIncomeConfirmed ? '–% · Lv4' : `${trackPercent}% · Lv${trackLevel}`,
-      color: !isIncomeConfirmed ? '#888888' : trackColor,
-    },
-    {
-      icon: '📈',
-      label: 'Build',
-      value: !isIncomeConfirmed
-        ? '₹0 / 0'
-        : `₹${Math.floor(vaultSummary.pocketedToday).toFixed(0)} / ${pocketDisplay.toFixed(0)}`,
-      color: !isIncomeConfirmed ? '#888888' : buildColor,
-    },
-  ];
-
-  const windowHeight = Dimensions.get('window').height;
-  /** Keep white sheet start exactly below navy header. */
-  const scrollTransparentSpacerHeight = HEADER_HEIGHT;
   const transactions = useMemo<Tx[]>(() => {
     const incomeTx: Tx[] = incomeActivity.map(item => {
       const created = item.createdAt ? new Date(item.createdAt) : null;
@@ -1220,6 +1173,18 @@ export const HomeScreen: React.FC = () => {
 
     return [...incomeTx, ...expenseTx].sort((a, b) => b.ts - a.ts);
   }, [expenseActivity, incomeActivity]);
+
+  const shownTransactions = useMemo(() => {
+    const now = Date.now();
+    const dayMs = 86400000;
+    if (activityTabUi === 'Daily') {
+      return transactions.filter(tx => tx.ts === 0 || now - tx.ts < dayMs);
+    }
+    if (activityTabUi === 'Weekly') {
+      return transactions.filter(tx => tx.ts === 0 || now - tx.ts < 7 * dayMs);
+    }
+    return transactions;
+  }, [transactions, activityTabUi]);
 
   const applyIncomeLinkedState = useCallback(
     (logs: IncomeSourceLog[]) => {
@@ -1325,7 +1290,7 @@ export const HomeScreen: React.FC = () => {
   closeExpenseModalRef.current = closeExpenseModal;
 
   const measureCenterInRoot = useCallback(
-    (viewRef: React.RefObject<View>) =>
+    (viewRef: React.RefObject<View | null>) =>
       new Promise<{ x: number; y: number } | null>((resolve) => {
         if (!viewRef.current || !rootRef.current) {
           resolve(null);
@@ -1387,42 +1352,75 @@ export const HomeScreen: React.FC = () => {
     });
   }, [measureCenterInRoot]);
 
-  const handlePocketNow = useCallback(async () => {
-    const livePocketAmt = unspent * (safePocketSplitPct / 100);
-    const liveHealAmt = unspent * ((100 - safePocketSplitPct) / 100);
-    if (!isIncomeConfirmed || livePocketAmt <= 0) return;
-    launchVaultCoins().catch(() => {});
-    const nextPocketedToday = livePocketAmt;
-    const nextTotalPocketed = vaultSummary.totalPocketed + livePocketAmt;
-    const nextLocked = vaultSummary.lockTarget > 0 ? nextTotalPocketed >= vaultSummary.lockTarget : false;
-    const todayStr = new Date().toDateString();
-    setVaultSummary(prev => ({
-      ...prev,
-      pocketedToday: nextPocketedToday,
-      totalPocketed: nextTotalPocketed,
-      locked: nextLocked,
-      lastPocketDate: todayStr,
-    }));
-    if (firestoreUserId) {
-      await patchVaultSummaryDoc(firestoreUserId, {
-        pocketedToday: nextPocketedToday,
-        totalPocketed: nextTotalPocketed,
-        locked: nextLocked,
-        lastPocketDate: todayStr,
+  /** Add `amount` to today's pocket and total pocketed (same Firestore fields as before). */
+  const applyPocketAmount = useCallback(
+    async (rawAmount: number) => {
+      const amt = Math.floor(rawAmount);
+      if (!isIncomeConfirmed || amt <= 0) return;
+      launchVaultCoins().catch(() => {});
+      const todayStr = new Date().toDateString();
+      setVaultSummary(prev => {
+        const nextPocketedToday = prev.pocketedToday + amt;
+        const nextTotalPocketed = prev.totalPocketed + amt;
+        const nextLocked = prev.lockTarget > 0 ? nextTotalPocketed >= prev.lockTarget : false;
+        const next = {
+          ...prev,
+          pocketedToday: nextPocketedToday,
+          totalPocketed: nextTotalPocketed,
+          locked: nextLocked,
+          lastPocketDate: todayStr,
+        };
+        if (firestoreUserId) {
+          patchVaultSummaryDoc(firestoreUserId, {
+            pocketedToday: nextPocketedToday,
+            totalPocketed: nextTotalPocketed,
+            locked: nextLocked,
+            lastPocketDate: todayStr,
+          }).catch(() => {});
+        }
+        console.log('Pocketed increment:', amt, '→ today:', nextPocketedToday);
+        return next;
       });
+    },
+    [firestoreUserId, isIncomeConfirmed, launchVaultCoins, patchVaultSummaryDoc],
+  );
+
+  const pocketPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pocketLongPressRef = useRef(false);
+  const pocketButtonScale = useSharedValue(1);
+  const pocketButtonAnimStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: pocketButtonScale.value }],
+  }));
+
+  const clearPocketPressTimer = useCallback(() => {
+    if (pocketPressTimerRef.current != null) {
+      clearTimeout(pocketPressTimerRef.current);
+      pocketPressTimerRef.current = null;
     }
-    console.log('Pocketed:', livePocketAmt, 'at', safePocketSplitPct, '%');
-    console.log('Healing future days:', liveHealAmt);
-  }, [
-    firestoreUserId,
-    isIncomeConfirmed,
-    launchVaultCoins,
-    patchVaultSummaryDoc,
-    safePocketSplitPct,
-    unspent,
-    vaultSummary.lockTarget,
-    vaultSummary.totalPocketed,
-  ]);
+  }, []);
+
+  useEffect(() => () => clearPocketPressTimer(), [clearPocketPressTimer]);
+
+  const handlePocketPressIn = useCallback(() => {
+    pocketLongPressRef.current = false;
+    pocketButtonScale.value = withSpring(0.95, STRIP_SPRING);
+    clearPocketPressTimer();
+    pocketPressTimerRef.current = setTimeout(() => {
+      pocketLongPressRef.current = true;
+      void applyPocketAmount(pocketAvailable);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+      clearPocketPressTimer();
+    }, 500);
+  }, [applyPocketAmount, clearPocketPressTimer, pocketAvailable, pocketButtonScale]);
+
+  const handlePocketPressOut = useCallback(() => {
+    pocketButtonScale.value = withSpring(1, STRIP_SPRING);
+    clearPocketPressTimer();
+    if (!pocketLongPressRef.current) {
+      void applyPocketAmount(Math.floor(pocketAvailable * 0.1));
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+    }
+  }, [applyPocketAmount, clearPocketPressTimer, pocketAvailable, pocketButtonScale]);
 
   useEffect(() => {
     console.log('pocketSplitPct:', safePocketSplitPct);
@@ -1486,8 +1484,17 @@ export const HomeScreen: React.FC = () => {
   }, [firestoreUserId, patchTrackRingDoc]);
 
   const handlePocketDone = useCallback(async () => {
-    updateUserSettingsFirestoreRecord({ pocketSplitPct: safePocketSplitPct }).catch(() => {});
-  }, [safePocketSplitPct]);
+    const snapped = snapPocketSplit(pocketSplitDraft);
+    setPocketSplitPct(snapped);
+    await updateUserSettingsFirestoreRecord({ pocketSplitPct: snapped }).catch(() => {});
+    setSheetActivePanel(null);
+  }, [pocketSplitDraft]);
+
+  useEffect(() => {
+    if (sheetActivePanel !== 'pocket') {
+      setPocketSplitDraft(snapPocketSplit(pocketSplitPct));
+    }
+  }, [pocketSplitPct, sheetActivePanel]);
 
   const submitExpense = useCallback(async () => {
     console.log('=== EXPENSE SUBMITTED ===');
@@ -1562,6 +1569,149 @@ export const HomeScreen: React.FC = () => {
       }),
     [handleRefreshReset, isRefreshing],
   );
+
+  useEffect(() => {
+    homeSheetPanStartRef.current = minimizedTop;
+    homeSheetCurrentTopRef.current = minimizedTop;
+    homeSheetTopTrackedRef.current = minimizedTop;
+    homeSheetTop.stopAnimation();
+    homeSheetTop.setValue(minimizedTop);
+  }, [minimizedTop, homeSheetTop]);
+
+  useEffect(() => {
+    const id = homeSheetTop.addListener(({ value }) => {
+      homeSheetTopTrackedRef.current = value;
+    });
+    return () => {
+      homeSheetTop.removeListener(id);
+    };
+  }, [homeSheetTop]);
+
+  const homeSheetPan = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => false,
+        onMoveShouldSetPanResponder: (_, g) => {
+          if (Math.abs(g.dy) <= Math.abs(g.dx) || Math.abs(g.dy) <= 5) return false;
+          const atScrollTop = scrollYValueRef.current <= 2;
+          if (!atScrollTop) return false;
+          const topNow = homeSheetTopTrackedRef.current;
+          if (g.dy < 0) {
+            return topNow >= minimizedTop - 10;
+          }
+          if (g.dy > 0) {
+            return topNow <= minimizedTop - 10;
+          }
+          return false;
+        },
+        onPanResponderGrant: () => {
+          homeSheetTop.stopAnimation((value: number) => {
+            homeSheetPanStartRef.current = value;
+            homeSheetTopTrackedRef.current = value;
+          });
+        },
+        onPanResponderMove: (_, g) => {
+          const next = homeSheetPanStartRef.current + g.dy;
+          const clamped = Math.max(expandedTop, Math.min(minimizedTop, next));
+          homeSheetCurrentTopRef.current = clamped;
+          homeSheetTopTrackedRef.current = clamped;
+          homeSheetTop.setValue(clamped);
+        },
+        onPanResponderRelease: (_, g) => {
+          const shouldExpand =
+            g.vy < -0.25 ||
+            homeSheetCurrentTopRef.current < expandedTop + (minimizedTop - expandedTop) * 0.68;
+          Animated.timing(homeSheetTop, {
+            toValue: shouldExpand ? expandedTop : minimizedTop,
+            duration: 220,
+            useNativeDriver: false,
+          }).start(({ finished }) => {
+            if (finished) {
+              homeSheetTopTrackedRef.current = shouldExpand ? expandedTop : minimizedTop;
+            }
+          });
+        },
+        onPanResponderTerminate: () => {
+          Animated.timing(homeSheetTop, {
+            toValue: minimizedTop,
+            duration: 220,
+            useNativeDriver: false,
+          }).start(() => {
+            homeSheetTopTrackedRef.current = minimizedTop;
+          });
+        },
+      }),
+    [expandedTop, minimizedTop, homeSheetTop],
+  );
+
+  const pocketStripHeight = useSharedValue(44);
+
+  useEffect(() => {
+    if (sheetActivePanel === 'pocket') {
+      pocketStripHeight.value = withSpring(170, STRIP_SPRING);
+    } else {
+      pocketStripHeight.value = withSpring(44, STRIP_SPRING);
+    }
+  }, [sheetActivePanel, pocketStripHeight]);
+
+  const pocketAnimStyle = useAnimatedStyle(() => ({
+    height: pocketStripHeight.value,
+    overflow: 'hidden',
+  }));
+
+  const openBudget = useCallback(() => {
+    setSheetActivePanel(p => (p === 'budget' ? null : 'budget'));
+  }, []);
+  const openPocket = useCallback(() => {
+    setPocketSplitDraft(snapPocketSplit(pocketSplitPct));
+    setSheetActivePanel(p => (p === 'pocket' ? null : 'pocket'));
+  }, [pocketSplitPct]);
+  const closeAll = useCallback(() => {
+    setSheetActivePanel(null);
+  }, []);
+
+  const greetingSub = useMemo(() => {
+    const h = currentTime.getHours();
+    if (h < 12) return 'Good Morning';
+    if (h < 17) return 'Good Afternoon';
+    return 'Good Evening';
+  }, [currentTime]);
+
+  const navigateRoot = useCallback((screen: string) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+    if (screen === 'Home') {
+      setActiveNav('home');
+      setActiveRootTab('Home');
+    } else if (screen === 'Spend') {
+      setActiveNav('spend');
+      setActiveRootTab('Home');
+      setIsExpenseModalVisible(true);
+    } else if (screen === 'IE' || screen === 'IncomeEngine') {
+      setActiveNav('incomeEngine');
+      setActiveRootTab('IncomeEngine');
+    } else if (screen === 'Wealth') {
+      setActiveNav('wealth');
+      setActiveRootTab('Wealth');
+    } else if (screen === 'More') {
+      setActiveNav('more');
+      setActiveRootTab('More');
+    }
+  }, []);
+
+  const footerActiveName =
+    activeNav === 'home'
+      ? 'Home'
+      : activeNav === 'spend'
+        ? 'Spend'
+        : activeNav === 'incomeEngine'
+          ? 'IE'
+          : activeNav === 'wealth'
+            ? 'Wealth'
+            : activeNav === 'more'
+              ? 'More'
+              : 'Home';
+
+  const incomeBasisForSlider = Math.max(confirmedIncomeForBudget, totalIncome);
 
   const sheetBottomPad = Platform.OS === 'ios' ? 34 : 20;
   const catCols = 4;
@@ -1676,282 +1826,683 @@ export const HomeScreen: React.FC = () => {
     <SafeAreaView
       ref={rootRef}
       style={s.mainContainer}
-      edges={['left', 'right']}
+      edges={['top']}
       onTouchStart={handleUserActivity}
     >
-      <StatusBar barStyle="light-content" backgroundColor={D.bg} />
+      <StatusBar barStyle="light-content" backgroundColor="#1A1A2E" />
 
-      {/* ── NAVY HEADER — fixed 42% height ─────────────────────────────────── */}
+      <View style={{ flex: 1, backgroundColor: '#1A1A2E' }}>
         <View
-        style={{
-          ...s.navyHeaderFixed,
-          height: Dimensions.get('window').height * NAVY_SECTION_RATIO,
-          paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight || 44) + 8 : insets.top + 8,
-          paddingBottom: 8,
-          paddingHorizontal: 24,
-          backgroundColor: '#0A0E17',
-        }}
-        {...headerRefreshPan.panHandlers}
-      >
-        <Animated.View
-          pointerEvents="none"
-          style={[
-            s.navyBlurOverlay,
-            {
-              opacity: scrollY.interpolate({
-                inputRange: [0, Math.round(200 * sk)],
-                outputRange: [0, 1],
-                extrapolate: 'clamp',
-              }),
-            },
-          ]}
-        />
-
-        {/* 1. TOP GREETING (Locked to the top) */}
-        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', height: 44, paddingHorizontal: 16 }}>
-          <View>
-            <Text style={s.greeting}>Hi, Welcome Back</Text>
-            <Text style={s.greetingSub}>Good Morning</Text>
+          style={{
+            height: NAVY_HEIGHT,
+            backgroundColor: '#1A1A2E',
+            alignItems: 'center',
+            justifyContent: 'flex-start',
+            paddingBottom: 0,
+            overflow: 'hidden',
+            zIndex: 2,
+          }}
+          {...headerRefreshPan.panHandlers}
+        >
+          <View
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              paddingHorizontal: 20,
+              paddingTop: 8,
+              height: 52,
+              width: '100%',
+            }}
+          >
+            <View
+              style={{
+                width: 36,
+                height: 36,
+                borderRadius: 18,
+                backgroundColor: 'rgba(255,255,255,0.15)',
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}
+            >
+              <Text style={{ fontSize: 16, color: '#FFFFFF', fontWeight: 'bold' }}>M</Text>
+            </View>
+            <View style={{ alignItems: 'center' }}>
+              <Text
+                style={{
+                  fontSize: 18,
+                  fontWeight: 'bold',
+                  color: '#FFFFFF',
+                  fontFamily: FONT_UI as string,
+                }}
+              >
+                Hi, Welcome Back
+              </Text>
+              <Text style={{ fontSize: 12, color: 'rgba(255,255,255,0.5)', marginTop: 1 }}>{greetingSub}</Text>
+            </View>
+            <TouchableOpacity
+              style={{
+                width: 36,
+                height: 36,
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}
+              activeOpacity={0.75}
+            >
+              <Text style={{ fontSize: 20 }}>🔔</Text>
+              <View
+                style={{
+                  position: 'absolute',
+                  top: 4,
+                  right: 4,
+                  width: 8,
+                  height: 8,
+                  borderRadius: 4,
+                  backgroundColor: '#38A169',
+                }}
+              />
+            </TouchableOpacity>
           </View>
-          <View style={s.bellWrap}>
-            <Text style={s.bellIcon}>🔔</Text>
-            <View style={s.bellDot} />
-          </View>
-        </View>
 
-        <View style={s.heroArea}>
-          <View style={s.heroSummaryRow}>
-            <View ref={heroRingsRef} collapsable={false} style={s.heroRingLeft}>
+          <View style={{ alignItems: 'center', justifyContent: 'center', marginTop: 8 }}>
+            <View ref={heroRingsRef} collapsable={false} style={{ width: 180, height: 180 }}>
               <HeroRings
-                buildPercentage={buildPercentage}
-              score={heroOvrScore}
+                score={heroOvrScore}
                 shieldCircumference={shieldCircumference}
                 shieldOffset={shieldOffset}
                 shieldColor={shieldColor}
                 trackCircumference={trackCircumference}
                 trackOffset={trackOffset}
                 trackColor={trackColor}
+                pocketCircumference={pocketCircumference}
+                pocketOffset={pocketOffset}
+                pocketColor={buildColor}
                 isLocked={!isIncomeConfirmed}
-                buildColor={buildColor}
               />
             </View>
-            <View style={s.metricListRight}>
-              {METRICS.map(m => (
-                <View key={m.label}>
-                  <Text style={s.metricLabelCompact}>{m.label}</Text>
-                  <Text style={[s.metricValueCompact, { color: m.color }]} numberOfLines={1}>
-                    {m.value}
-                  </Text>
-                </View>
-              ))}
+          </View>
+
+          <View
+            style={{
+              flexDirection: 'row',
+              justifyContent: 'space-around',
+              alignItems: 'center',
+              width: '100%',
+              paddingHorizontal: 24,
+              marginTop: 8,
+              marginBottom: 8,
+            }}
+          >
+            <View style={{ alignItems: 'center' }}>
+              <Text
+                style={{
+                  fontSize: 11,
+                  color: 'rgba(255,255,255,0.45)',
+                  textTransform: 'uppercase',
+                  letterSpacing: 1.2,
+                  fontFamily: FONT_UI as string,
+                  marginBottom: 3,
+                }}
+              >
+                SHIELD
+              </Text>
+              <Text
+                style={{
+                  fontSize: 13,
+                  fontFamily: FONT_MONO as string,
+                  fontWeight: '700',
+                  color: isIncomeConfirmed ? '#FF3B5C' : '#555555',
+                }}
+              >
+                {isIncomeConfirmed
+                  ? `₹${Math.round(dailySpent)}/${Math.round(activeDailyBudget)}`
+                  : '₹0 / –'}
+              </Text>
+            </View>
+            <View style={{ width: 1, height: 24, backgroundColor: 'rgba(255,255,255,0.1)' }} />
+            <View style={{ alignItems: 'center' }}>
+              <Text
+                style={{
+                  fontSize: 11,
+                  color: 'rgba(255,255,255,0.45)',
+                  textTransform: 'uppercase',
+                  letterSpacing: 1.2,
+                  fontFamily: FONT_UI as string,
+                  marginBottom: 3,
+                }}
+              >
+                TRACK
+              </Text>
+              <Text
+                style={{
+                  fontSize: 13,
+                  fontFamily: FONT_MONO as string,
+                  fontWeight: '700',
+                  color: isIncomeConfirmed ? '#00B4FF' : '#555555',
+                }}
+              >
+                {isIncomeConfirmed
+                  ? `${Math.round(trackPercentage * 100)}% · Lv${trackLevel}`
+                  : '–% · Lv4'}
+              </Text>
+            </View>
+            <View style={{ width: 1, height: 24, backgroundColor: 'rgba(255,255,255,0.1)' }} />
+            <View style={{ alignItems: 'center' }}>
+              <Text
+                style={{
+                  fontSize: 11,
+                  color: 'rgba(255,255,255,0.45)',
+                  textTransform: 'uppercase',
+                  letterSpacing: 1.2,
+                  fontFamily: FONT_UI as string,
+                  marginBottom: 3,
+                }}
+              >
+                POCKET
+              </Text>
+              <Text
+                style={{
+                  fontSize: 13,
+                  fontFamily: FONT_MONO as string,
+                  fontWeight: '700',
+                  color: isIncomeConfirmed ? '#FFAA00' : '#555555',
+                }}
+              >
+                {isIncomeConfirmed
+                  ? `₹${Math.round(vaultSummary.pocketedToday)}/${Math.round(pocketGoal)}`
+                  : '₹0 / 0'}
+              </Text>
             </View>
           </View>
-          <View style={s.insightWrap}>
-            <TouchableOpacity
-              style={s.insightPill}
-              activeOpacity={0.75}
-              onPress={() => {
-                if (!isIncomeConfirmed) {
-                  setActiveNav('incomeEngine');
-                  setActiveRootTab('IncomeEngine');
-                }
+        </View>
+
+        <Animated.View
+          {...homeSheetPan.panHandlers}
+          style={{
+            position: 'absolute',
+            left: 0,
+            right: 0,
+            bottom: 0,
+            top: homeSheetTop,
+            backgroundColor: '#FFFFFF',
+            borderTopLeftRadius: 24,
+            borderTopRightRadius: 24,
+            overflow: 'hidden',
+            zIndex: 5,
+          }}
+        >
+          <View style={{ width: '100%', paddingTop: 6, paddingBottom: 6 }}>
+            <View style={{ alignItems: 'center' }}>
+              <View
+                style={{
+                  width: 40,
+                  height: 4,
+                  backgroundColor: '#E4E2F5',
+                  borderRadius: 2,
+                }}
+              />
+            </View>
+          </View>
+          <ScrollView
+            style={{ flex: 1 }}
+            contentContainerStyle={{ paddingTop: 8, paddingBottom: 100 }}
+            scrollEventThrottle={16}
+            onScroll={onWhiteCardScroll}
+            bounces
+            scrollEnabled
+            alwaysBounceVertical
+            overScrollMode="always"
+            showsVerticalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
+            nestedScrollEnabled
+            refreshControl={
+              <RefreshControl refreshing={isRefreshing} onRefresh={handleRefreshReset} />
+            }
+          >
+            {insight && (
+              <TouchableOpacity
+                onPress={() => insight.action && navigateRoot(insight.action)}
+                activeOpacity={0.75}
+                style={{
+                  marginHorizontal: SIDE_MARGIN,
+                  marginBottom: 10,
+                  backgroundColor: insight.bg,
+                  borderRadius: 20,
+                  borderWidth: 1,
+                  borderColor: insight.border,
+                  paddingHorizontal: 14,
+                  paddingVertical: 10,
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                }}
+              >
+                <Text style={{ fontSize: 14, marginRight: 8 }}>{insight.icon}</Text>
+                <Text
+                  style={{
+                    flex: 1,
+                    fontSize: 13,
+                    color: insight.color,
+                    fontFamily: FONT_UI as string,
+                    fontWeight: '500',
+                  }}
+                  numberOfLines={1}
+                >
+                  {insight.text}
+                </Text>
+                {insight.action ? (
+                  <Text style={{ fontSize: 16, color: insight.color, opacity: 0.6, marginLeft: 6 }}>›</Text>
+                ) : null}
+              </TouchableOpacity>
+            )}
+
+            <View
+              style={{
+                marginHorizontal: SIDE_MARGIN,
+                marginBottom: 8,
+                backgroundColor: '#1E1E3A',
+                borderRadius: 14,
+                overflow: 'hidden',
+                borderWidth: 1,
+                borderColor: 'rgba(255,255,255,0.08)',
               }}
             >
-              <Text style={s.insightSpark}>{insightIcon}</Text>
-              <Text style={s.insightText} numberOfLines={1}>
-                {insightText}
-              </Text>
-              <Text style={s.insightArrow}>›</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </View>
-
-      <Animated.View
-        pointerEvents="none"
-        style={{
-          position: 'absolute',
-          left: 0,
-          right: 0,
-          top: 0,
-          zIndex: 5,
-          height: HEADER_HEIGHT + CURVE + 24,
-          backgroundColor: '#FFFFFF',
-          opacity: expandTopWashOpacity,
-        }}
-      />
-
-      <Animated.ScrollView
-        bounces
-        overScrollMode="always"
-        showsVerticalScrollIndicator={false}
-        stickyHeaderIndices={[1]}
-        style={{ flex: 1, zIndex: 10 }}
-        contentContainerStyle={s.scrollContentTransparent}
-        scrollEventThrottle={16}
-        onScroll={Animated.event(
-          [{ nativeEvent: { contentOffset: { y: scrollY } } }],
-          { useNativeDriver: false },
-        )}
-        alwaysBounceVertical
-        refreshControl={
-          <RefreshControl refreshing={isRefreshing} onRefresh={handleRefreshReset} />
-        }
-      >
-        {/* INDEX 0: invisible spacer — exact 40% navy header height */}
-        <View style={[s.scrollTopSpacer, { height: scrollTransparentSpacerHeight }]} />
-
-        {/* INDEX 1: sticky white sheet (grabber, pills, title, filters) */}
-        <View
-          style={[
-            s.stickySheetHeader,
-            {
-              backgroundColor: '#FFFFFF',
-              borderTopLeftRadius: 36,
-              borderTopRightRadius: 36,
-              paddingBottom: 0,
-            },
-          ]}
-        >
-            <View style={s.sheetHandle} />
-
-            <Animated.View style={[{ opacity: squareOpacity, transform: [{ translateY: squareTranslateY }] }]}>
-              <View style={{ height: CARD_SIZE, width: '100%', position: 'relative', marginTop: Math.max(0, 20 - CARD_SIZE * 0.03) }}>
-                <PocketSplitCard
-                  cardSize={CARD_SIZE}
-                  rightOffset={CARD_ROW_SIDE_MARGIN}
-                  pocketSplitPct={pocketSplitPct}
-                  setPocketSplitPct={setPocketSplitPct}
-                  onDone={handlePocketDone}
-                  onPocketNow={handlePocketNow}
-                  unspent={unspent}
-                  pocketButtonRef={sweepPillRef}
-                />
-
-                {/* Flipping Daily Budget Card (Animated Overlay) */}
-                <DailyBudgetCard
-                  cardSize={CARD_SIZE}
-                  leftOffset={CARD_ROW_SIDE_MARGIN}
-                  dailySpent={dailySpent}
-                  dailyLimit={dailyLimit}
-                  setDailyLimit={setCustomDailyLimit}
-                  criticalLimit={criticalDailyFloor}
-                  sliderMin={0}
-                  sliderMax={dynamicDailyMax}
-                  arcSlot={<BudgetArc size={arcSize} progress={dailyBudgetProgress} />}
-                />
-              </View>
-            </Animated.View>
-
-            <Animated.View pointerEvents="none" style={[s.expandedPillStrip, { opacity: expandedOpacity, transform: [{ translateY: expandedTranslateY }] }]}>
-              <View style={[s.expandedPillCard, s.expandedPillCardDark]}>
-                <View style={s.expandedPillIconWrap}><Text style={s.expandedPillIcon}>💗</Text></View>
-                <View style={s.expandedPillCopy}>
-                  <Text style={s.expandedPillLabel}>DAILY BUDGET</Text>
-                  <View style={s.expandedPillAmount}>
-                    <Text
-                      style={s.expandedPillAmountStrong}
-                      numberOfLines={1}
-                      adjustsFontSizeToFit
-                      minimumFontScale={0.6}
-                    >
-                      {dailySpent.toLocaleString('en-IN')}
-                    </Text>
-                    <Text style={s.expandedPillAmountSoft}>
-                      /{dailyLimit.toLocaleString('en-IN')}
-                    </Text>
-                  </View>
-                </View>
-              </View>
-
-              <View style={[s.expandedPillCard, s.expandedPillCardDark]}>
-                <View style={s.expandedPillIconWrapYellow}><Text style={s.expandedPillIconDark}>💛</Text></View>
-                <View style={s.expandedPillCopy}>
-                  <Text style={s.expandedPillLabel}>POCKET IT</Text>
-                  <View style={s.expandedPillAmount}>
-                    <Text
-                      style={s.expandedPillAmountStrong}
-                      numberOfLines={1}
-                      adjustsFontSizeToFit
-                      minimumFontScale={0.6}
-                    >
-                      ₹{pocketDisplay.toFixed(0)}
-                    </Text>
-                  </View>
-                </View>
-              </View>
-            </Animated.View>
-
-            <Animated.View
-              pointerEvents={sheetExpandedForInput ? 'box-none' : 'none'}
-              style={[s.expandedActivityOverlay, { opacity: expandedOpacity }]}
-            >
-              <Text style={s.expandedActivityTitle}>Recent Activity</Text>
-              <View style={s.expandedTabStrip}>
-                {(['Daily', 'Weekly', 'Monthly'] as TabKey[]).map(tab => (
-                  <TouchableOpacity
-                    key={tab}
-                    activeOpacity={0.75}
-                    style={[s.expandedTab, activeTab === tab && s.expandedTabActive]}
-                    onPress={() => setActiveTab(tab)}
+              <TouchableOpacity
+                onPress={openBudget}
+                activeOpacity={0.88}
+                style={{
+                  height: 48,
+                  paddingHorizontal: 14,
+                  paddingVertical: 8,
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                }}
+              >
+                <View style={{ flex: 1, marginRight: 12 }}>
+                  <View
+                    style={{
+                      flexDirection: 'row',
+                      justifyContent: 'space-between',
+                      marginBottom: 5,
+                    }}
                   >
-                    <Text style={[s.expandedTabTxt, activeTab === tab && s.expandedTabTxtActive]}>{tab}</Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-            </Animated.View>
-
-            {!sheetExpandedForInput && (
-              <Animated.View style={{ opacity: activityHeaderOpacity, marginTop: Math.round(CARD_SIZE * 0.1) }}>
-                <View style={s.activityHeader}>
-                  <Text style={s.activityTitle}>Recent Activity</Text>
-                  <View style={s.tabStrip}>
-                    {(['Daily', 'Weekly', 'Monthly'] as TabKey[]).map(tab => (
-                      <TouchableOpacity
-                        key={tab}
-                        style={[s.tab, activeTab === tab && s.tabActive]}
-                        onPress={() => setActiveTab(tab)}
-                      >
-                        <Text style={[s.tabTxt, activeTab === tab && s.tabTxtActive]}>{tab}</Text>
-                      </TouchableOpacity>
-                    ))}
+                    <Text
+                      style={{
+                        fontSize: 10,
+                        color: 'rgba(255,255,255,0.45)',
+                        textTransform: 'uppercase',
+                        letterSpacing: 1,
+                      }}
+                    >
+                      DAILY BUDGET
+                    </Text>
+                    <Text style={{ fontSize: 12, fontFamily: FONT_MONO as string, fontWeight: '600', color: '#FFFFFF' }}>
+                      ₹{Math.round(dailySpent)}
+                      <Text style={{ color: 'rgba(255,255,255,0.4)' }}>/{Math.round(activeDailyBudget)}</Text>
+                    </Text>
+                  </View>
+                  <View
+                    style={{
+                      height: 4,
+                      backgroundColor: 'rgba(255,255,255,0.1)',
+                      borderRadius: 2,
+                      overflow: 'hidden',
+                    }}
+                  >
+                    <View
+                      style={{
+                        height: 4,
+                        borderRadius: 2,
+                        width: `${Math.min((dailySpent / Math.max(activeDailyBudget, 1)) * 100, 100)}%`,
+                        backgroundColor: '#FF3B5C',
+                      }}
+                    />
                   </View>
                 </View>
-              </Animated.View>
-            )}
-        </View>
+              </TouchableOpacity>
 
-        {/* INDEX 2: ledger — infinite white below sticky header */}
-        <Animated.View
-          style={[
-            s.txListShell,
-            { minHeight: windowHeight },
-            sheetExpandedForInput && { marginTop: -txListOverlapExpanded, paddingTop: txListExpandedTopInset },
-          ]}
-        >
-          {transactions.length ? (
-            transactions.map((tx, i) => (
-              <View key={tx.id} style={[s.txRow, i < transactions.length - 1 && s.txDivider]}>
-                <View style={[s.txIcon, { backgroundColor: tx.iconBg }]}>
-                  <Text style={s.txEmoji}>{tx.emoji}</Text>
+              {sheetActivePanel === 'budget' && (
+                <View style={{ paddingHorizontal: 14, paddingBottom: 14 }}>
+                  <Slider
+                    style={{ width: '100%', height: 40 }}
+                    minimumValue={1}
+                    maximumValue={50}
+                    step={1}
+                    value={monthlyAllocationPercent}
+                    onValueChange={val => {
+                      const v = Math.round(val);
+                      setMonthlyAllocationPercent(v);
+                      const pool = incomeBasisForSlider * (v / 100);
+                      setCustomDailyLimit(Math.floor(pool / 30));
+                    }}
+                    onSlidingComplete={async val => {
+                      const v = Math.round(val);
+                      const pool = Math.floor(incomeBasisForSlider * (v / 100));
+                      const daily = Math.floor(pool / 30);
+                      setMonthlyAllocationPercent(v);
+                      setCustomDailyLimit(daily);
+                      await updateUserSettingsFirestoreRecord({
+                        allocationPct: v,
+                        monthlyPool: pool,
+                        activeDailyBudget: daily,
+                      });
+                    }}
+                    minimumTrackTintColor="#6C63FF"
+                    maximumTrackTintColor="rgba(255,255,255,0.2)"
+                    thumbTintColor="#6C63FF"
+                  />
+                  <View
+                    style={{
+                      flexDirection: 'row',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      marginTop: 8,
+                    }}
+                  >
+                    <Text style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)', flex: 1 }}>
+                      {monthlyAllocationPercent}% · ₹
+                      {Math.round((incomeBasisForSlider * monthlyAllocationPercent) / 100).toLocaleString('en-IN')}/mo
+                    </Text>
+                    <TouchableOpacity
+                      onPress={closeAll}
+                      style={{
+                        borderWidth: 1.5,
+                        borderColor: '#6C63FF',
+                        borderRadius: 20,
+                        paddingHorizontal: 20,
+                        paddingVertical: 6,
+                      }}
+                    >
+                      <Text style={{ color: '#6C63FF', fontSize: 12, fontWeight: '600' }}>Done</Text>
+                    </TouchableOpacity>
+                  </View>
                 </View>
-                <View style={s.txInfo}>
-                  <Text style={s.txName}>{tx.name}</Text>
-                  <Text style={s.txSub}>{tx.sub}</Text>
-                </View>
-                <Text style={[s.txAmt, { color: tx.positive ? '#16A34A' : TEXT_PRIMARY }]}>
-                  {tx.positive ? '+' : '-'}₹{tx.amount.toLocaleString('en-IN')}
-                </Text>
-              </View>
-            ))
-          ) : (
-            <View style={s.emptyActivityWrap}>
-              <Text style={s.emptyActivityTitle}>No recent activity yet</Text>
-              <Text style={s.emptyActivitySub}>Add an income source to see live entries here.</Text>
+              )}
             </View>
-          )}
+
+            <Reanimated.View
+              style={[
+                {
+                  marginHorizontal: SIDE_MARGIN,
+                  marginBottom: 14,
+                  backgroundColor: '#1E1E3A',
+                  borderRadius: 14,
+                  overflow: 'hidden',
+                  borderWidth: 1,
+                  borderColor: 'rgba(255,170,0,0.15)',
+                },
+                pocketAnimStyle,
+              ]}
+            >
+              <View
+                style={{
+                  height: 44,
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  paddingHorizontal: 14,
+                }}
+              >
+                <TouchableOpacity
+                  onPress={openPocket}
+                  activeOpacity={0.88}
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    gap: 8,
+                    flex: 1,
+                  }}
+                >
+                  <Text style={{ fontSize: 16 }}>💛</Text>
+                  <Text
+                    style={{
+                      fontSize: 10,
+                      textTransform: 'uppercase',
+                      letterSpacing: 1,
+                      color: 'rgba(255,255,255,0.45)',
+                    }}
+                  >
+                    POCKET
+                  </Text>
+                  <Text style={{ fontSize: 13, fontFamily: FONT_MONO as string, fontWeight: '600', color: '#FFAA00' }}>
+                    ₹{Math.round(pocketAvailable)}
+                  </Text>
+                </TouchableOpacity>
+                <Reanimated.View style={pocketButtonAnimStyle}>
+                  <TouchableOpacity
+                    onPressIn={handlePocketPressIn}
+                    onPressOut={handlePocketPressOut}
+                    activeOpacity={0.8}
+                    delayPressIn={0}
+                  >
+                    <View
+                      ref={sweepPillRef}
+                      collapsable={false}
+                      style={{
+                        backgroundColor: '#FFAA00',
+                        borderRadius: 20,
+                        paddingHorizontal: 14,
+                        paddingVertical: 7,
+                        shadowColor: '#FFAA00',
+                        shadowRadius: 8,
+                        shadowOpacity: 0.4,
+                        shadowOffset: { width: 0, height: 0 },
+                        elevation: 4,
+                      }}
+                    >
+                      <Text
+                        style={{
+                          color: '#1A1A2E',
+                          fontSize: 11,
+                          fontWeight: '700',
+                          letterSpacing: 0.5,
+                        }}
+                      >
+                        Pocket Now
+                      </Text>
+                    </View>
+                  </TouchableOpacity>
+                </Reanimated.View>
+              </View>
+
+              {sheetActivePanel === 'pocket' && (
+                <View style={{ paddingHorizontal: 14, paddingBottom: 14 }}>
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
+                    <Text
+                      style={{
+                        fontSize: 11,
+                        color: 'rgba(255,255,255,0.45)',
+                        textTransform: 'uppercase',
+                        letterSpacing: 1,
+                      }}
+                    >
+                      POCKET SPLIT
+                    </Text>
+                    <Text style={{ fontSize: 13, fontFamily: FONT_MONO as string, fontWeight: '600', color: '#FFAA00' }}>
+                      {pocketSplitDraft}%
+                    </Text>
+                  </View>
+                  <View onStartShouldSetResponder={() => true}>
+                    <Slider
+                      style={{ width: '100%', height: 40 }}
+                      minimumValue={10}
+                      maximumValue={90}
+                      step={5}
+                      value={pocketSplitDraft}
+                      onValueChange={val => {
+                        setPocketSplitDraft(Math.round(val));
+                      }}
+                      onSlidingComplete={val => {
+                        setPocketSplitDraft(Math.round(val));
+                      }}
+                      minimumTrackTintColor="#FFAA00"
+                      maximumTrackTintColor="rgba(255,255,255,0.2)"
+                      thumbTintColor="#FFAA00"
+                    />
+                  </View>
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 12 }}>
+                    <Text style={{ fontSize: 11, color: '#38A169' }}>
+                      Savings ₹{Math.floor(pocketAvailable * (pocketSplitDraft / 100))}
+                    </Text>
+                    <Text style={{ fontSize: 11, color: '#3182CE' }}>
+                      Future days ₹{Math.floor(pocketAvailable * ((100 - pocketSplitDraft) / 100))}
+                    </Text>
+                  </View>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                      <Text
+                        style={{
+                          fontSize: 12,
+                          fontWeight: '600',
+                          color: localAutoMode ? '#38A169' : 'rgba(255,255,255,0.4)',
+                          width: 52,
+                        }}
+                      >
+                        {localAutoMode ? 'Auto' : 'Manual'}
+                      </Text>
+                      <Switch
+                        value={localAutoMode}
+                        onValueChange={val => {
+                          setLocalAutoMode(val);
+                          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+                        }}
+                        trackColor={{
+                          false: '#3A3A4A',
+                          true: '#38A169',
+                        }}
+                        thumbColor="#FFFFFF"
+                        ios_backgroundColor="#3A3A4A"
+                      />
+                    </View>
+                    <TouchableOpacity
+                      onPress={handlePocketDone}
+                      style={{
+                        borderWidth: 1.5,
+                        borderColor: '#FFAA00',
+                        borderRadius: 20,
+                        paddingHorizontal: 20,
+                        paddingVertical: 6,
+                      }}
+                    >
+                      <Text style={{ color: '#FFAA00', fontSize: 12, fontWeight: '600' }}>Done</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              )}
+            </Reanimated.View>
+
+            <View style={{ paddingHorizontal: 16, marginBottom: 12 }}>
+              <View
+                style={{
+                  flexDirection: 'row',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  marginBottom: 12,
+                }}
+              >
+                <Text
+                  style={{
+                    fontSize: 16,
+                    fontWeight: '700',
+                    color: '#1A1A2E',
+                    fontFamily: FONT_UI as string,
+                  }}
+                >
+                  Recent Activity
+                </Text>
+                <View
+                  style={{
+                    flexDirection: 'row',
+                    backgroundColor: '#F0F0F8',
+                    borderRadius: 20,
+                    padding: 2,
+                  }}
+                >
+                  {(['Daily', 'Weekly', 'Monthly'] as TabKey[]).map(tab => (
+                    <TouchableOpacity
+                      key={tab}
+                      onPress={() => setActivityTabUi(tab)}
+                      activeOpacity={0.75}
+                      style={{
+                        paddingHorizontal: 10,
+                        paddingVertical: 5,
+                        borderRadius: 18,
+                        backgroundColor: activityTabUi === tab ? '#FFFFFF' : 'transparent',
+                      }}
+                    >
+                      <Text
+                        style={{
+                          fontSize: 11,
+                          fontWeight: activityTabUi === tab ? '600' : '400',
+                          color: activityTabUi === tab ? '#1A1A2E' : '#8888AA',
+                        }}
+                      >
+                        {tab}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </View>
+
+              {shownTransactions.length ? (
+                shownTransactions.map((tx, i) => {
+                  const [timeLine, catLine] = tx.sub.includes(' · ')
+                    ? (tx.sub.split(' · ', 2) as [string, string])
+                    : [tx.sub, ''];
+                  const signed = tx.positive ? tx.amount : -tx.amount;
+                  return (
+                    <View
+                      key={tx.id}
+                      style={{
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        paddingVertical: 10,
+                        borderBottomWidth: i < shownTransactions.length - 1 ? 1 : 0,
+                        borderBottomColor: '#F5F5F8',
+                      }}
+                    >
+                      <View
+                        style={{
+                          width: 40,
+                          height: 40,
+                          borderRadius: 12,
+                          backgroundColor: '#F0F0F8',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          marginRight: 12,
+                        }}
+                      >
+                        <Text style={{ fontSize: 20 }}>{tx.emoji || '💳'}</Text>
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ fontSize: 14, fontWeight: '600', color: '#1A1A2E' }}>{tx.name}</Text>
+                        <Text style={{ fontSize: 11, color: '#8888AA', marginTop: 2 }}>
+                          {timeLine} · {catLine}
+                        </Text>
+                      </View>
+                      <Text
+                        style={{
+                          fontSize: 14,
+                          fontFamily: FONT_MONO as string,
+                          fontWeight: '600',
+                          color: signed > 0 ? '#38A169' : '#1A1A2E',
+                        }}
+                      >
+                        {signed > 0 ? '+' : ''}₹{Math.abs(tx.amount).toLocaleString('en-IN')}
+                      </Text>
+                    </View>
+                  );
+                })
+              ) : (
+                <View style={s.emptyActivityWrap}>
+                  <Text style={s.emptyActivityTitle}>No recent activity yet</Text>
+                  <Text style={s.emptyActivitySub}>Add an income source to see live entries here.</Text>
+                </View>
+              )}
+            </View>
+          </ScrollView>
         </Animated.View>
-      </Animated.ScrollView>
+      </View>
 
       <View pointerEvents="none" style={s.coinOverlay}>
         {coinAnims.map(coin => (
@@ -1976,33 +2527,6 @@ export const HomeScreen: React.FC = () => {
         ))}
       </View>
 
-      {activeRootTab === 'More' && (
-        <View
-          style={{
-            position: 'absolute',
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            zIndex: 40,
-            backgroundColor: '#0A0E17',
-          }}
-        >
-          <MoreScreen
-            onIncomeEnginePress={() => setActiveRootTab('IncomeEngine')}
-            onLoanPress={() => setActiveRootTab('Home')}
-            headerShieldPct={Math.round(shieldPercentage * 100)}
-            headerTrackPct={Math.round(trackPercentage * 100)}
-            headerBuildPct={Math.round(buildPercentage * 100)}
-            headerOvrScore={ovrScore}
-            onBack={() => {
-              setActiveNav('home');
-              setActiveRootTab('Home');
-            }}
-          />
-        </View>
-      )}
-
       {activeRootTab === 'IncomeEngine' && (
         <View
           style={{
@@ -2016,7 +2540,10 @@ export const HomeScreen: React.FC = () => {
           }}
         >
           <IncomeEngineScreen
-            onBack={() => setActiveRootTab('More')}
+            onBack={() => {
+              setActiveNav('home');
+              setActiveRootTab('Home');
+            }}
             headerShieldPct={Math.round(shieldPercentage * 100)}
             headerTrackPct={Math.round(trackPercentage * 100)}
             headerBuildPct={Math.round(buildPercentage * 100)}
@@ -2050,28 +2577,137 @@ export const HomeScreen: React.FC = () => {
         </View>
       )}
 
-      <View
-        pointerEvents="none"
-        style={[s.bottomSafeAreaFill, { height: Math.max(insets.bottom, 8) + 6 }]}
-      />
-
-      {/* ── TAB BAR ───────────────────────────────────────────────────────── */}
-      <Animated.View style={[s.floatingFooter, { transform: [{ translateY: footerTranslateY }] }]} pointerEvents="box-none">
-        <View style={s.tabBar}>
-          <NavItem icon="home" label="Home" active={activeNav === 'home'} onPress={() => { setActiveNav('home'); setActiveRootTab('Home'); }} />
-          <NavItem icon="credit-card" label="Spend" active={activeNav === 'spend'} onPress={() => { setActiveNav('spend'); setActiveRootTab('Home'); }} />
-          <NavItem icon="account-balance-wallet" label="Wealth" active={activeNav === 'wealth'} onPress={() => { setActiveNav('wealth'); setActiveRootTab('Wealth'); }} />
-          <NavItem icon="savings" label="IE" active={activeNav === 'incomeEngine'} onPress={() => { setActiveNav('incomeEngine'); setActiveRootTab('IncomeEngine'); }} />
-          <NavItem icon="more-horiz" label="More" active={activeNav === 'more'} onPress={() => { setActiveNav('more'); setActiveRootTab('More'); }} />
-
-          {activeRootTab === 'Home' ? (
-            <View style={s.fabAbsWrap} pointerEvents="box-none">
-              <TouchableOpacity style={s.fab} onPress={() => setIsExpenseModalVisible(true)} activeOpacity={0.85}>
-                <Text style={s.fabIcon}>+</Text>
-              </TouchableOpacity>
-            </View>
-          ) : null}
+      {activeRootTab === 'More' && (
+        <View
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            zIndex: 40,
+            backgroundColor: '#0A0E17',
+          }}
+        >
+          <MoreScreen
+            onBack={() => {
+              setActiveNav('home');
+              setActiveRootTab('Home');
+            }}
+            headerShieldPct={Math.round(shieldPercentage * 100)}
+            headerTrackPct={Math.round(trackPercentage * 100)}
+            headerBuildPct={Math.round(buildPercentage * 100)}
+            headerOvrScore={ovrScore}
+          />
         </View>
+      )}
+
+      {/* ── Floating pill tab bar (matches Wealth-style sheet nav) ─ */}
+      <Animated.View style={[s.floatingFooter, { transform: [{ translateY: footerTranslateY }] }]} pointerEvents="box-none">
+        <View
+          style={{
+            position: 'absolute',
+            bottom: 0,
+            left: 0,
+            right: 0,
+            paddingTop: 6,
+            paddingBottom: Math.max(insets.bottom, Platform.OS === 'ios' ? 8 : 6),
+            paddingHorizontal: 14,
+            backgroundColor: 'transparent',
+          }}
+        >
+          <View
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              backgroundColor: '#FFFFFF',
+              borderRadius: 20,
+              paddingVertical: 4,
+              paddingHorizontal: 4,
+              borderWidth: StyleSheet.hairlineWidth,
+              borderColor: 'rgba(26,26,46,0.06)',
+              shadowColor: '#000000',
+              shadowOffset: { width: 0, height: 4 },
+              shadowOpacity: 0.1,
+              shadowRadius: 12,
+              elevation: 8,
+            }}
+          >
+            {(
+              [
+                { name: 'Home' as const, screen: 'Home' as const, kind: 'ion' as const, active: 'home' as const, inactive: 'home-outline' as const },
+                { name: 'Spend' as const, screen: 'Spend' as const, kind: 'ion' as const, active: 'card' as const, inactive: 'card-outline' as const },
+                { name: 'Wealth' as const, screen: 'Wealth' as const, kind: 'ion' as const, active: 'wallet' as const, inactive: 'wallet-outline' as const },
+                { name: 'IE' as const, screen: 'IE' as const, kind: 'mci' as const, active: 'piggy-bank' as const, inactive: 'piggy-bank-outline' as const },
+                { name: 'More' as const, screen: 'More' as const, kind: 'ion' as const, active: 'ellipsis-horizontal' as const, inactive: 'ellipsis-horizontal' as const },
+              ] as const
+            ).map(tab => {
+              const isActive = footerActiveName === tab.name;
+              const blue = '#1E88FF';
+              const muted = '#1A1A2E';
+              return (
+                <TouchableOpacity
+                  key={tab.name}
+                  style={{ flex: 1, alignItems: 'center', justifyContent: 'center', minHeight: 44, paddingVertical: 2 }}
+                  onPress={() => navigateRoot(tab.screen)}
+                  activeOpacity={0.75}
+                >
+                  {isActive ? (
+                    <View
+                      style={{
+                        alignSelf: 'center',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        minWidth: 64,
+                        paddingHorizontal: 12,
+                        paddingVertical: 5,
+                        borderRadius: 14,
+                        backgroundColor: 'rgba(30, 136, 255, 0.14)',
+                        borderWidth: StyleSheet.hairlineWidth,
+                        borderColor: 'rgba(30, 136, 255, 0.28)',
+                      }}
+                    >
+                      {tab.kind === 'mci' ? (
+                        <MaterialCommunityIcons name={tab.active as 'piggy-bank'} size={19} color={blue} />
+                      ) : (
+                        <Ionicons name={tab.active} size={19} color={blue} />
+                      )}
+                      <Text style={{ fontSize: 9, fontWeight: '700', color: blue, marginTop: 2, fontFamily: FONT_UI as string }} numberOfLines={1}>
+                        {tab.name}
+                      </Text>
+                    </View>
+                  ) : (
+                    <View style={{ alignItems: 'center', justifyContent: 'center', paddingVertical: 4 }}>
+                      {tab.kind === 'mci' ? (
+                        <MaterialCommunityIcons name={tab.inactive as 'piggy-bank-outline'} size={19} color={muted} />
+                      ) : (
+                        <Ionicons name={tab.inactive} size={19} color={muted} />
+                      )}
+                      <Text style={{ fontSize: 9, fontWeight: '600', color: muted, marginTop: 2, fontFamily: FONT_UI as string }} numberOfLines={1}>
+                        {tab.name}
+                      </Text>
+                    </View>
+                  )}
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        </View>
+        {activeRootTab === 'Home' ? (
+          <View
+            style={[
+              s.fabAbsWrap,
+              {
+                bottom: Math.max(insets.bottom, 8) + 52 + 8,
+              },
+            ]}
+            pointerEvents="box-none"
+          >
+            <TouchableOpacity style={s.fab} onPress={() => setIsExpenseModalVisible(true)} activeOpacity={0.85}>
+              <Text style={s.fabIcon}>+</Text>
+            </TouchableOpacity>
+          </View>
+        ) : null}
       </Animated.View>
 
       <Modal
@@ -2107,7 +2743,7 @@ export const HomeScreen: React.FC = () => {
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
 const s = StyleSheet.create({
-  mainContainer: { flex: 1, backgroundColor: D.bg },
+  mainContainer: { flex: 1, backgroundColor: '#1A1A2E' },
   safe: { flex: 1, backgroundColor: '#FFFFFF' },
 
   // ── Navy section — fixed 40% height, content distributed vertically ──────
@@ -2182,28 +2818,6 @@ const s = StyleSheet.create({
     fontWeight: '600',
     fontFamily: FONT_MONO as string,
   },
-  insightWrap: {
-    width: '100%',
-    paddingHorizontal: 20,
-    paddingBottom: 16,
-  },
-
-  // Insight pill — pinned at base of navy section
-  insightPill: {
-    flexDirection: 'row', alignItems: 'center', gap: 9,
-    alignSelf: 'center',
-    width: '100%',
-    marginHorizontal: 0,
-    marginTop: 0,
-    marginBottom: 0,
-    backgroundColor: 'rgba(255,255,255,0.1)',
-    borderRadius: 20,
-    paddingHorizontal: 16, paddingVertical: 10,
-    borderWidth: 1, borderColor: 'rgba(255,255,255,0.12)',
-  },
-  insightSpark: { fontSize: 14, color: VAULT_GOLD },
-  insightText:  { flex: 1, fontSize: 13, color: 'rgba(255,255,255,0.9)', fontWeight: '600' },
-  insightArrow: { fontSize: 20, color: D.muted, fontWeight: '300' },
   // ── Scroll: transparent spacer + sticky sheet + ledger shell ──────────────
   scrollContentTransparent: {
     flexGrow: 1,
@@ -2219,15 +2833,6 @@ const s = StyleSheet.create({
     paddingBottom: 0,
     overflow: 'hidden',
   },
-  whiteCardContent: {
-    backgroundColor: '#FFFFFF',
-    borderTopLeftRadius: 36,
-    borderTopRightRadius: 36,
-    overflow: 'hidden',
-    paddingHorizontal: WHITE_PAD,
-    paddingTop: 20,
-    paddingBottom: 220,
-  },
   sheetHandle: {
     alignSelf: 'center',
     width: 34,
@@ -2236,169 +2841,34 @@ const s = StyleSheet.create({
     backgroundColor: '#D9DAE7',
     marginBottom: 0,
   },
-
-  // ── Action pills ──────────────────────────────────────────────────────────
-  actionGrid: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    position: 'relative',
+  sheetInsightClip: {
     width: '100%',
-    aspectRatio: 100 / 48,
-    marginTop: 16,
-    marginBottom: 20,
-    overflow: 'visible',
-  },
-  vaultCardSlot: {
-    position: 'absolute',
-    right: 0,
-    top: 0,
-    width: '48%',
-    aspectRatio: 1,
-    zIndex: 1,
-  },
-  budgetCard: {
-    backgroundColor: D.card,
-    borderRadius: RADIUS_LG,
-    padding: 14,
-    justifyContent: 'space-between',
     overflow: 'hidden',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.22,
-    shadowRadius: 8,
-    elevation: 6,
+    paddingHorizontal: 0,
+    marginTop: 4,
+    marginBottom: 4,
   },
-  budgetTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' },
-  heartBadge: { width: 32, height: 32, borderRadius: 10, backgroundColor: 'rgba(255,255,255,0.08)', alignItems: 'center', justifyContent: 'center' },
-  heartIcon: { fontSize: 16 },
-  budgetBottom: { gap: 2, width: '100%', minWidth: 0 },
-  cardLabel: { fontSize: 9, fontWeight: '800', color: D.muted, letterSpacing: 1 },
-  ratioRow: {
-    flexDirection: 'row',
-    alignItems: 'baseline',
-    width: '100%',
-    minWidth: 0,
-  },
-  ratioSpend: {
-    flex: 1,
-    minWidth: 0,
-    fontSize: 24,
-    fontWeight: '900',
-    color: '#FFFFFF',
-    letterSpacing: -1,
-    fontFamily: FONT_MONO as string,
-  },
-  ratioLimit: { fontSize: 14, fontWeight: '600', color: 'rgba(255,255,255,0.38)', fontFamily: FONT_MONO as string },
-
-  vaultCard: {
-    width: '100%',
-    aspectRatio: 1,
-    backgroundColor: CYBER_YELLOW,
-    borderRadius: RADIUS_LG,
-    padding: 14,
-    justifyContent: 'space-between',
-    shadowColor: CYBER_YELLOW,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 6,
-  },
-  vaultTopRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  vaultIndicator: { width: 28, height: 28, borderRadius: 14, backgroundColor: 'rgba(0,0,0,0.12)', alignItems: 'center', justifyContent: 'center' },
-  sweepPill: {
+  sheetInsightPill: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
-    backgroundColor: CYBER_YELLOW,
-    borderRadius: 50,
-    borderWidth: 1.5,
-    borderColor: 'rgba(0,0,0,0.20)',
-    paddingHorizontal: 8,
-    paddingVertical: 5,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.28,
-    shadowRadius: 3,
-    elevation: 4,
+    gap: 9,
+    width: '100%',
+    backgroundColor: 'rgba(108, 99, 255, 0.08)',
+    borderRadius: 16,
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+    borderWidth: 1,
+    borderColor: 'rgba(108, 99, 255, 0.22)',
   },
-  sweepPillPressWrap: {
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.32,
-    shadowRadius: 4,
-    elevation: 5,
-    borderRadius: 50,
+  sheetInsightSpark: { fontSize: 14, color: PURPLE },
+  sheetInsightText: {
+    flex: 1,
+    fontSize: 13,
+    color: TEXT_PRIMARY,
+    fontWeight: '600',
   },
-  sweepPillIcon: { fontSize: 11, color: '#1A1005' },
-  sweepPillTxt: { fontSize: 7, fontWeight: '900', color: '#1A1005', letterSpacing: 0.4, lineHeight: 9 },
-  vaultBottom: { gap: 1, width: '100%', minWidth: 0 },
-  vaultLabel: { fontSize: 9, fontWeight: '800', color: 'rgba(0,0,0,0.5)', letterSpacing: 1 },
-  vaultAmount: {
-    alignSelf: 'stretch',
-    fontSize: 24,
-    fontWeight: '900',
-    color: '#1A1005',
-    letterSpacing: -1,
-    fontFamily: FONT_MONO as string,
-  },
-  vaultSub: { fontSize: 9, fontWeight: '700', color: 'rgba(0,0,0,0.45)', letterSpacing: 0.5 },
+  sheetInsightArrow: { fontSize: 20, color: TEXT_MUTED, fontWeight: '300' },
 
-  budgetPill: {
-    flex: 1,
-    minHeight: 92,
-    backgroundColor: D.card,
-    borderRadius: 24,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    justifyContent: 'space-between',
-    overflow: 'hidden',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.18,
-    shadowRadius: 8,
-    elevation: 4,
-  },
-  vaultPill: {
-    flex: 1,
-    minHeight: 92,
-    backgroundColor: CYBER_YELLOW,
-    borderRadius: 24,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    justifyContent: 'space-between',
-    overflow: 'hidden',
-    shadowColor: CYBER_YELLOW,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.22,
-    shadowRadius: 8,
-    elevation: 4,
-  },
-  pillTopLine: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' },
-  pillBottomLine: { gap: 2 },
-  pillIconBadge: { width: 30, height: 30, borderRadius: 10, backgroundColor: 'rgba(255,255,255,0.06)', alignItems: 'center', justifyContent: 'center' },
-  pillIconBadgeYellow: { width: 30, height: 30, borderRadius: 10, backgroundColor: 'rgba(0,0,0,0.14)', alignItems: 'center', justifyContent: 'center' },
-  pillIcon: { fontSize: 15 },
-  pillIconDark: { fontSize: 15 },
-  pillLabel: { fontSize: 9, fontWeight: '800', color: D.muted, letterSpacing: 1 },
-  pillValue: { flexDirection: 'row', alignItems: 'baseline' },
-  pillValueStrong: { fontSize: 27, fontWeight: '900', color: '#FFFFFF', letterSpacing: -1, fontFamily: FONT_MONO as string },
-  pillValueMuted: { fontSize: 14, fontWeight: '600', color: 'rgba(255,255,255,0.38)', fontFamily: FONT_MONO as string },
-  sweepChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    backgroundColor: CYBER_YELLOW,
-    borderRadius: 999,
-    borderWidth: 1.5,
-    borderColor: 'rgba(0,0,0,0.18)',
-    paddingHorizontal: 8,
-    paddingVertical: 5,
-  },
-  sweepChipIcon: { fontSize: 11, color: '#1A1005' },
-  sweepChipText: { fontSize: 7, fontWeight: '900', color: '#1A1005', letterSpacing: 0.4, lineHeight: 9 },
-  vaultPillLabel: { fontSize: 9, fontWeight: '800', color: 'rgba(0,0,0,0.55)', letterSpacing: 1 },
-  vaultPillAmount: { fontSize: 26, fontWeight: '900', color: '#1A1005', letterSpacing: -1, fontFamily: FONT_MONO as string },
-  vaultPillSub: { fontSize: 9, fontWeight: '700', color: 'rgba(0,0,0,0.45)', letterSpacing: 0.5 },
   expandedPillStrip: {
     position: 'absolute',
     top: EXPANDED_PILLS_TOP,
@@ -2420,7 +2890,7 @@ const s = StyleSheet.create({
     gap: 10,
   },
   expandedPillCardDark: {
-    backgroundColor: '#1A1A2E',
+    backgroundColor: '#FFFFFF',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 3 },
     shadowOpacity: 0.18,
@@ -2603,7 +3073,7 @@ const s = StyleSheet.create({
     paddingHorizontal: WHITE_PAD,
     paddingTop: 0,
     marginTop: 0,
-    paddingBottom: 200,
+    paddingBottom: 16,
   },
 
   // ── Tab bar ───────────────────────────────────────────────────────────────
@@ -2616,54 +3086,16 @@ const s = StyleSheet.create({
     zIndex: 999,
     elevation: 50,
   },
-  bottomSafeAreaFill: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: '#FFFFFF',
-    zIndex: 920,
+  footerNavLabelActive: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#FFFFFF',
+    maxWidth: 56,
   },
-  tabBar: {
-    position: 'absolute',
-    bottom: 22,
-    left: 14,
-    right: 14,
-    minHeight: 64,
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(255,255,255,0.68)',
-    borderRadius: 34,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.9)',
-    paddingHorizontal: 10,
-    paddingVertical: 9,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.08,
-    shadowRadius: 16,
-    elevation: 12,
-  },
-  navItem:        { flex: 1, alignItems: 'center', gap: 2, paddingBottom: 0, borderRadius: 18, paddingVertical: 5 },
-  navItemActiveGlass: {
-    backgroundColor: 'rgba(255,255,255,0.84)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.98)',
-    shadowColor: '#94A3B8',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.28,
-    shadowRadius: 6,
-    elevation: 2,
-  },
-  navIcon:        { color: '#1F2937' },
-  navIconActive:  { color: '#1E88FF' },
-  navLabel:       { fontSize: 10, color: '#4B5563', fontWeight: '600', letterSpacing: 0.1 },
-  navLabelActive: { color: '#1E88FF', fontWeight: '800' },
 
   fabAbsWrap: {
     position: 'absolute',
-    right: 8,
-    top: -61,
+    right: 16,
     alignItems: 'flex-end',
   },
   fab: {
