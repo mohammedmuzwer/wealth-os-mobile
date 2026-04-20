@@ -12,7 +12,6 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import Svg, { Rect } from 'react-native-svg';
 import * as Haptics from 'expo-haptics';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Reanimated, { runOnJS, useAnimatedStyle, useSharedValue, withSpring } from 'react-native-reanimated';
@@ -47,7 +46,7 @@ const MONTH_NAMES = [
 ] as const;
 
 const SPRING = { damping: 20, stiffness: 180, mass: 0.6 };
-const TREEMAP_H = 150;
+export const TREEMAP_H = 150;
 const GAP = 2;
 const COL1_FR = 0.42;
 const COL3_FR = 0.22;
@@ -60,14 +59,14 @@ const SHEET_SPRING = {
   useNativeDriver: false,
 } as const;
 
-type MonthRef = { year: number; month: number };
+export type MonthRef = { year: number; month: number };
 
-const addMonths = (ref: MonthRef, delta: number): MonthRef => {
+export const addMonths = (ref: MonthRef, delta: number): MonthRef => {
   const d = new Date(ref.year, ref.month + delta, 1);
   return { year: d.getFullYear(), month: d.getMonth() };
 };
 
-const formatMonthYearShort = (ref: MonthRef) =>
+export const formatMonthYearShort = (ref: MonthRef) =>
   `${MONTH_NAMES[ref.month]} ${ref.year}`;
 
 const formatKey = (d: Date) => {
@@ -77,13 +76,13 @@ const formatKey = (d: Date) => {
   return `${y}-${m}-${day}`;
 };
 
-const moneyIn = (n: number) => `₹${Math.round(n).toLocaleString('en-IN')}`;
+export const moneyIn = (n: number) => `₹${Math.round(n).toLocaleString('en-IN')}`;
 
 const safeImpactLight = () => {
   Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
 };
 
-const categoryTreemapColor = (category: string): string => {
+export const categoryTreemapColor = (category: string): string => {
   const c = category.toLowerCase();
   if (c.includes('emi') || c.includes('loan')) return '#6C63FF';
   if (c.includes('food')) return '#FF3B5C';
@@ -103,7 +102,7 @@ const heatColor = (spend: number, dailyBudget: number, isFutureEmpty: boolean) =
   return '#6C63FF';
 };
 
-type TreemapCell = {
+export type TreemapCell = {
   key: string;
   x: number;
   y: number;
@@ -115,7 +114,7 @@ type TreemapCell = {
   color: string;
 };
 
-const buildTreemapLayout = (
+export const buildTreemapLayout = (
   sorted: { category: string; amount: number }[],
   total: number,
   W: number,
@@ -385,30 +384,48 @@ const ledgerStyles = StyleSheet.create({
   },
 });
 
+// ─── Props ────────────────────────────────────────────────────────────────────
+
 export type SpendingScrollBodyProps = {
   activeDailyBudget: number;
   tabBarHeight: number;
+  /**
+   * When false, the animated white-card shell and drag handle are omitted —
+   * NavyCardLayout provides them instead. Default: true (standalone mode).
+   */
+  standalone?: boolean;
+  /**
+   * Controlled selected month from parent (SpendingScreen).
+   * When provided, the internal month state is overridden by this value.
+   */
+  controlledMonth?: MonthRef;
 };
+
+// ─── Component ────────────────────────────────────────────────────────────────
 
 export const SpendingScrollBody: React.FC<SpendingScrollBodyProps> = ({
   activeDailyBudget: fallbackBudget,
   tabBarHeight,
+  standalone,
+  controlledMonth,
 }) => {
   const screenHeight = Dimensions.get('window').height;
-  const { expenses, activeDailyBudget, loading, error, removeExpenseLocal } =
+  const { expenses, activeDailyBudget, removeExpenseLocal } =
     useSpendingFirestoreData(fallbackBudget);
-  const [selectedMonth, setSelectedMonth] = useState<MonthRef>(() => {
+
+  // Internal month state — overridden when controlledMonth is provided
+  const [internalSelectedMonth, setInternalSelectedMonth] = useState<MonthRef>(() => {
     const d = new Date();
     return { year: d.getFullYear(), month: d.getMonth() };
   });
+  const selectedMonth = controlledMonth ?? internalSelectedMonth;
+
   const [bodyW, setBodyW] = useState(360);
-  const [topSectionHeight, setTopSectionHeight] = useState(
-    Math.round(screenHeight * NAVY_SECTION_RATIO),
-  );
+  // topSectionHeight is fixed — NavyCardLayout owns the navy area in embedded mode
+  const topSectionHeight = Math.round(screenHeight * NAVY_SECTION_RATIO);
   const [analyticsMode, setAnalyticsMode] = useState<'selected' | 'prior'>('selected');
   const [tooltip, setTooltip] = useState<TooltipState | null>(null);
-  const [treemapFocus, setTreemapFocus] = useState<string | null>(null);
-  const restoreTreemapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const minimizedTop = topSectionHeight;
   const expandedTop = 8;
   const sheetTop = useRef(new RNAnimated.Value(Math.round(screenHeight * NAVY_SECTION_RATIO))).current;
@@ -508,33 +525,6 @@ export const SpendingScrollBody: React.FC<SpendingScrollBodyProps> = ({
 
   const analyticsSource = analyticsMode === 'selected' ? monthExpenses : priorMonthExpenses;
 
-  const totalSpent = useMemo(() => monthExpenses.reduce((s, e) => s + e.amount, 0), [monthExpenses]);
-
-  const fixedTotal = useMemo(
-    () => monthExpenses.filter(e => e.tag === 'fixed').reduce((s, e) => s + e.amount, 0),
-    [monthExpenses],
-  );
-  const variableTotal = useMemo(
-    () => monthExpenses.filter(e => e.tag === 'variable').reduce((s, e) => s + e.amount, 0),
-    [monthExpenses],
-  );
-  const splitDenom = Math.max(1, fixedTotal + variableTotal);
-
-  const categoryTotals = useMemo(() => {
-    const m: Record<string, number> = {};
-    for (const e of monthExpenses) {
-      m[e.category] = (m[e.category] || 0) + e.amount;
-    }
-    return Object.entries(m)
-      .map(([category, amount]) => ({ category, amount }))
-      .sort((a, b) => b.amount - a.amount);
-  }, [monthExpenses]);
-
-  const treemapLayout = useMemo(
-    () => buildTreemapLayout(categoryTotals, totalSpent, bodyW - 32),
-    [categoryTotals, totalSpent, bodyW],
-  );
-
   const perDay = useMemo(() => {
     const m: Record<string, number> = {};
     for (const e of monthExpenses) {
@@ -552,7 +542,7 @@ export const SpendingScrollBody: React.FC<SpendingScrollBodyProps> = ({
   const heatRows = Math.ceil(daysInMonth / HEAT_COLS);
   const heatInnerW = bodyW - 28;
   const cell = (heatInnerW - (HEAT_COLS - 1) * 3) / HEAT_COLS;
-  const scrollPad = 100;
+  const scrollPad = Math.max(tabBarHeight, 100);
 
   const categoryBars = useMemo(() => {
     const m: Record<string, number> = {};
@@ -580,25 +570,6 @@ export const SpendingScrollBody: React.FC<SpendingScrollBodyProps> = ({
       return { day, rows, dayTotal };
     });
   }, [monthExpenses]);
-
-  const cycleMonthNext = () => setSelectedMonth(m => addMonths(m, 1));
-  const cycleMonthPrev = () => setSelectedMonth(m => addMonths(m, -1));
-
-  useEffect(() => {
-    if (!treemapFocus) return;
-    if (restoreTreemapTimer.current) clearTimeout(restoreTreemapTimer.current);
-    restoreTreemapTimer.current = setTimeout(() => {
-      setTreemapFocus(null);
-      restoreTreemapTimer.current = null;
-    }, 1400);
-    return () => {
-      if (restoreTreemapTimer.current) clearTimeout(restoreTreemapTimer.current);
-    };
-  }, [treemapFocus]);
-
-  const onTreemapCellPress = (cat: string) => {
-    setTreemapFocus(prev => (prev === cat ? null : cat));
-  };
 
   const dominantCategoryForDay = (dayKey: string): string => {
     const rows = monthExpenses.filter(e => formatKey(e.date) === dayKey);
@@ -644,131 +615,11 @@ export const SpendingScrollBody: React.FC<SpendingScrollBodyProps> = ({
 
   const dismissTooltip = () => setTooltip(null);
 
-  const treemapW = bodyW - 32;
-
-  return (
-    <View style={styles.flex} onLayout={onBodyLayout}>
-      <View
-        style={styles.navySection}
-        onLayout={(e) => {
-          const h = Math.ceil(e.nativeEvent.layout.height);
-          if (h > 0 && h !== topSectionHeight) {
-            const templateHeight = Math.round(screenHeight * NAVY_SECTION_RATIO);
-            setTopSectionHeight(Math.max(templateHeight, h));
-          }
-        }}
-      >
-        <View style={styles.mmHeaderRow}>
-          <Text style={styles.mmTitle}>Money Map</Text>
-          <TouchableOpacity
-            style={styles.monthPill}
-            onPress={cycleMonthNext}
-            onLongPress={cycleMonthPrev}
-            delayLongPress={280}
-            activeOpacity={0.85}
-          >
-            <Text style={styles.monthPillTxt}>
-              {formatMonthYearShort(selectedMonth)} <Text style={styles.monthPillCaret}>▾</Text>
-            </Text>
-          </TouchableOpacity>
-        </View>
-
-        <Text style={styles.totalAmt}>{moneyIn(totalSpent)}</Text>
-        <Text style={styles.totalLbl}>spent this month</Text>
-
-        <View style={[styles.treemapOuter, { width: treemapW }]}>
-          {treemapLayout.length ? (
-            <>
-              <Svg width={treemapW} height={TREEMAP_H} pointerEvents="none">
-                {treemapLayout.map(cell => {
-                  const dim = treemapFocus && treemapFocus !== cell.category ? 0.35 : 1;
-                  const fill = cell.color;
-                  return (
-                    <Rect
-                      key={cell.key}
-                      x={cell.x}
-                      y={cell.y}
-                      width={Math.max(0, cell.w)}
-                      height={Math.max(0, cell.h)}
-                      rx={6}
-                      ry={6}
-                      fill={fill}
-                      opacity={dim}
-                    />
-                  );
-                })}
-              </Svg>
-              <View style={[StyleSheet.absoluteFillObject, { pointerEvents: 'box-none' }]} pointerEvents="box-none">
-                {treemapLayout.map(cell => {
-                  const dim = treemapFocus && treemapFocus !== cell.category ? 0.35 : 1;
-                  return (
-                    <Pressable
-                      key={`${cell.key}-lbl`}
-                      style={[
-                        styles.treemapLblWrap,
-                        {
-                          left: cell.x,
-                          top: cell.y,
-                          width: cell.w,
-                          height: cell.h,
-                          opacity: dim,
-                        },
-                      ]}
-                      onPress={() => onTreemapCellPress(cell.category)}
-                    >
-                      <Text style={styles.treemapCat} numberOfLines={2}>
-                        {cell.category}
-                      </Text>
-                      <Text style={styles.treemapMoney}>{moneyIn(cell.amount)}</Text>
-                      <Text style={styles.treemapPct}>{Math.round(cell.pct)}%</Text>
-                    </Pressable>
-                  );
-                })}
-              </View>
-            </>
-          ) : (
-            <View style={[styles.treemapEmpty, { width: treemapW }]}>
-              <Text style={styles.treemapEmptyTxt}>{loading ? 'Loading…' : 'No spend this month'}</Text>
-            </View>
-          )}
-        </View>
-
-        <Text style={styles.vfLabel}>VARIABLE VS FIXED</Text>
-        <View style={styles.vfTrack}>
-          <View
-            style={[
-              styles.vfFixed,
-              {
-                flex: fixedTotal + variableTotal > 0 ? fixedTotal : 1,
-              },
-            ]}
-          />
-          <View
-            style={[
-              styles.vfVar,
-              {
-                flex: fixedTotal + variableTotal > 0 ? variableTotal : 1,
-              },
-            ]}
-          />
-        </View>
-        <View style={styles.vfLegendRow}>
-          <View style={styles.vfLeft}>
-            <View style={[styles.vfDot, { backgroundColor: PURPLE }]} />
-            <Text style={styles.vfMono}>
-              Fixed {moneyIn(fixedTotal)}
-            </Text>
-          </View>
-          <View style={styles.vfRight}>
-            <View style={[styles.vfDot, { backgroundColor: CRIMSON }]} />
-            <Text style={styles.vfMono}>
-              Variable {moneyIn(variableTotal)}
-            </Text>
-          </View>
-        </View>
-        {error ? <Text style={styles.errTxt}>{error}</Text> : null}
-      </View>
-
+  // Layout-shell helper: wraps the ScrollView in the animated card shell when
+  // running standalone. When embedded in NavyCardLayout, returns content as-is.
+  const wrapWithShell = (content: React.ReactNode): React.ReactNode => {
+    if (standalone === false) return content;
+    return (
       <RNAnimated.View
         style={[styles.whiteSheet, { top: sheetTop }]}
         {...sheetPan.panHandlers}
@@ -776,6 +627,14 @@ export const SpendingScrollBody: React.FC<SpendingScrollBodyProps> = ({
         <View style={styles.sheetHandleWrap} {...sheetPan.panHandlers}>
           <View style={styles.sheetHandle} />
         </View>
+        {content}
+      </RNAnimated.View>
+    );
+  };
+
+  return (
+    <View style={styles.flex} onLayout={onBodyLayout}>
+      {wrapWithShell(
         <ScrollView
           style={styles.sheetScroll}
           contentContainerStyle={[styles.whiteCardShell, { paddingBottom: scrollPad }]}
@@ -895,7 +754,7 @@ export const SpendingScrollBody: React.FC<SpendingScrollBodyProps> = ({
             <Text style={styles.empty}>No transactions this month.</Text>
           )}
         </ScrollView>
-      </RNAnimated.View>
+      )}
 
       <Modal visible={!!tooltip} transparent animationType="none" onRequestClose={dismissTooltip}>
         <Pressable style={[styles.modalFill, { paddingBottom: scrollPad }]} onPress={dismissTooltip}>
@@ -918,120 +777,11 @@ export const SpendingScrollBody: React.FC<SpendingScrollBodyProps> = ({
   );
 };
 
+// ─── Styles ───────────────────────────────────────────────────────────────────
+
 const styles = StyleSheet.create({
   flex: { flex: 1, backgroundColor: '#1A1A2E' },
   scroll: { flex: 1 },
-  navySection: {
-    backgroundColor: NAVY,
-    paddingLeft: 16,
-    paddingRight: 16,
-    paddingBottom: 16,
-    paddingTop: 0,
-    zIndex: 1,
-  },
-  mmHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 10,
-  },
-  mmTitle: {
-    color: WHITE,
-    fontSize: 12,
-    fontWeight: '700',
-    fontFamily: FONT_UI as string,
-  },
-  monthPill: {
-    backgroundColor: 'rgba(255,255,255,0.1)',
-    borderRadius: 20,
-    paddingVertical: 3,
-    paddingHorizontal: 8,
-  },
-  monthPillTxt: { fontSize: 9, color: '#aaa', fontFamily: FONT_UI as string, fontWeight: '600' },
-  monthPillCaret: { fontSize: 8, color: '#aaa' },
-  totalAmt: {
-    color: WHITE,
-    fontSize: 22,
-    fontWeight: '700',
-    fontFamily: FONT_MONO as string,
-    marginTop: 2,
-  },
-  totalLbl: { marginTop: 2, fontSize: 9, color: MUTED, fontFamily: FONT_UI as string },
-  treemapOuter: {
-    marginTop: 12,
-    height: TREEMAP_H,
-    borderRadius: 12,
-    overflow: 'hidden',
-    alignSelf: 'center',
-  },
-  treemapLblWrap: {
-    position: 'absolute',
-    padding: 6,
-    justifyContent: 'center',
-  },
-  treemapCat: {
-    color: 'rgba(255,255,255,0.9)',
-    fontSize: 8,
-    fontWeight: '700',
-    fontFamily: FONT_UI as string,
-  },
-  treemapMoney: {
-    marginTop: 2,
-    color: WHITE,
-    fontSize: 9,
-    fontWeight: '700',
-    fontFamily: FONT_MONO as string,
-  },
-  treemapPct: {
-    marginTop: 2,
-    color: 'rgba(255,255,255,0.65)',
-    fontSize: 7,
-    fontWeight: '600',
-    fontFamily: FONT_UI as string,
-  },
-  treemapEmpty: {
-    height: TREEMAP_H,
-    borderRadius: 12,
-    backgroundColor: 'rgba(255,255,255,0.06)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    alignSelf: 'center',
-  },
-  treemapEmptyTxt: { color: 'rgba(255,255,255,0.45)', fontSize: 11, fontFamily: FONT_UI as string },
-  vfLabel: {
-    marginTop: 14,
-    fontSize: 8,
-    color: MUTED,
-    fontWeight: '700',
-    letterSpacing: 0.6,
-    fontFamily: FONT_UI as string,
-  },
-  vfTrack: {
-    marginTop: 6,
-    height: 5,
-    borderRadius: 3,
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    flexDirection: 'row',
-    overflow: 'hidden',
-  },
-  vfFixed: { backgroundColor: PURPLE },
-  vfVar: { backgroundColor: CRIMSON },
-  vfLegendRow: {
-    marginTop: 8,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  vfLeft: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  vfRight: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  vfDot: { width: 6, height: 6, borderRadius: 3 },
-  vfMono: {
-    color: 'rgba(255,255,255,0.88)',
-    fontSize: 8,
-    fontWeight: '600',
-    fontFamily: FONT_MONO as string,
-  },
-  errTxt: { marginTop: 8, color: '#fca5a5', fontSize: 10, fontFamily: FONT_UI as string },
   whiteSheet: {
     position: 'absolute',
     left: 0,

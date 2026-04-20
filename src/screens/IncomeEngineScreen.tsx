@@ -43,6 +43,15 @@ import {
   updateUserSettingsFirestoreRecord,
   updateIncomeHistoryFirestoreRecord,
 } from '../services/incomeHistorySync';
+import {
+  getIncome,
+  saveIncome,
+  getSettings,
+  getExpenses,
+  getIncomeSources,
+  upsertIncomeSource,
+  deleteIncomeSource,
+} from '../utils/localStorage';
 
 type IncomeEngineScreenProps = {
   onBack?: () => void;
@@ -309,51 +318,26 @@ export const IncomeEngineScreen: React.FC<IncomeEngineScreenProps> = ({
 
   useEffect(() => {
     (async () => {
-      const savedUserId = await AsyncStorage.getItem('wos_user_id');
-      const userId = FIRESTORE_USER_ID || savedUserId;
-      if (!FIRESTORE_PROJECT_ID || !userId) return;
-      const url = `https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/(default)/documents/users/${userId}/settings`;
-      const res = await fetch(url).catch(() => null);
-      if (!res || !res.ok) return;
-      const doc = await res.json();
-      const allocRaw = doc?.fields?.allocationPct;
-      const nextAllocation =
-        typeof allocRaw?.integerValue === 'string'
-          ? Number(allocRaw.integerValue)
-          : typeof allocRaw?.doubleValue === 'number'
-            ? allocRaw.doubleValue
-            : 10;
-      setAllocationPct(Number.isFinite(nextAllocation) ? Math.max(1, Math.min(50, Math.round(nextAllocation))) : 10);
+      const incomeData = await getIncome();
+      if (incomeData.allocationPct) {
+        setAllocationPct(Math.max(1, Math.min(50, Math.round(incomeData.allocationPct))));
+      }
     })();
   }, []);
 
   const refreshIncomeDocs = useCallback(async () => {
-    const savedUserId = await AsyncStorage.getItem('wos_user_id');
-    const userId = FIRESTORE_USER_ID || savedUserId;
-    if (!FIRESTORE_PROJECT_ID || !userId) return;
-    const url = `https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/(default)/documents/users/${userId}/income`;
-    const res = await fetch(url).catch(() => null);
-    if (!res || !res.ok) return;
-    const payload = await res.json();
-    const docs = Array.isArray(payload?.documents) ? payload.documents : [];
-    const parsed: FirestoreIncomeDoc[] = docs.map((doc: any) => {
-      const fields = doc?.fields || {};
-      const name = String(fields.name?.stringValue || fields.title?.stringValue || 'Income');
-      const category = String(fields.category?.stringValue || 'Other');
-      const freq = String(fields.frequency?.stringValue || '');
-      return {
-        id: String(doc?.name || '').split('/').pop() || `income-${Math.random()}`,
-        amount: Math.max(0, getFirestoreNumber(fields.amount)),
-        confirmed: getFirestoreBoolean(fields.confirmed),
-        expectedDate: getFirestoreDate(fields.expected_date) || getFirestoreDate(fields.confirmed_at),
-        recurrenceType: String(fields.recurrence_type?.stringValue || ''),
-        title: name,
-        category,
-        frequency: freq,
-      };
-    }) as any;
+    const sources = await getIncomeSources();
+    const parsed: FirestoreIncomeDoc[] = sources.map(s => ({
+      id: s.id,
+      amount: s.amount,
+      confirmed: s.confirmed,
+      expectedDate: s.expectedDate ? new Date(s.expectedDate) : null,
+      recurrenceType: s.recurrenceType,
+      title: s.title,
+      category: s.category,
+      frequency: s.frequency,
+    }));
     setIncomeDocs(parsed);
-    console.log('Income updated:', parsed);
   }, []);
 
   useEffect(() => {
@@ -362,43 +346,25 @@ export const IncomeEngineScreen: React.FC<IncomeEngineScreenProps> = ({
 
   useEffect(() => {
     let isMounted = true;
-    let pollTimer: ReturnType<typeof setInterval> | null = null;
 
     const refreshExpenses = async () => {
-      const savedUserId = await AsyncStorage.getItem('wos_user_id');
-      const userId = FIRESTORE_USER_ID || savedUserId;
-      if (!FIRESTORE_PROJECT_ID || !userId) return;
-      const url = `https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/(default)/documents/users/${userId}/expenses`;
-      const res = await fetch(url).catch(() => null);
-      if (!res || !res.ok) return;
-      const payload = await res.json();
-      const docs = Array.isArray(payload?.documents) ? payload.documents : [];
-
+      const expenses = await getExpenses();
       const now = new Date();
       const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
       const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1).getTime();
-
-      const total = docs.reduce((sum: number, doc: any) => {
-        const fields = doc?.fields || {};
-        const amount = Math.max(0, getFirestoreNumber(fields.amount));
-        const isFixed = getFirestoreBoolean(fields.is_fixed);
-        const stamp = getFirestoreDate(fields.timestamp) || getFirestoreDate(fields.date);
-        if (isFixed || !stamp) return sum;
-        const ts = stamp.getTime();
+      const total = expenses.reduce((sum, e) => {
+        if (e.tag === 'fixed') return sum;
+        const ts = new Date(e.date).getTime();
         if (ts < startOfMonth || ts >= endOfMonth) return sum;
-        return sum + amount;
+        return sum + e.amount;
       }, 0);
       if (isMounted) setTotalSpentThisMonth(total);
     };
 
     void refreshExpenses();
-    pollTimer = setInterval(() => {
-      void refreshExpenses();
-    }, 15000);
 
     return () => {
       isMounted = false;
-      if (pollTimer) clearInterval(pollTimer);
     };
   }, []);
 
@@ -496,7 +462,7 @@ export const IncomeEngineScreen: React.FC<IncomeEngineScreenProps> = ({
     const safePct = Math.max(1, Math.min(50, Math.round(nextPct)));
     const nextPool = Math.floor(confirmedIncome * (safePct / 100));
     const nextDaily = Math.floor(nextPool / 30);
-    await updateUserSettingsFirestoreRecord({
+    await saveIncome({
       allocationPct: safePct,
       monthlyPool: nextPool,
       activeDailyBudget: nextDaily,
@@ -599,26 +565,25 @@ export const IncomeEngineScreen: React.FC<IncomeEngineScreenProps> = ({
       );
       addIncomeHistory(entry);
       createIncomeHistoryFirestoreRecord(entry).catch(() => {});
-      (async () => {
-        const savedUserId = await AsyncStorage.getItem('wos_user_id');
-        const userId = FIRESTORE_USER_ID || savedUserId;
-        if (!FIRESTORE_PROJECT_ID || !userId) return;
-        const docUrl = `https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/(default)/documents/users/${userId}/income/${source.id}`;
-        await fetch(docUrl, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            fields: {
-              confirmed: { booleanValue: true },
-              confirmed_at: { timestampValue: new Date().toISOString() },
-            },
-          }),
-        }).catch(() => null);
-      })();
-      updateUserSettingsFirestoreRecord({
+      // Persist confirmed status and updated budget to AsyncStorage
+      upsertIncomeSource({
+        id: source.id,
+        title: source.title,
+        category: source.category,
+        amount: source.amount,
+        date: source.date,
+        isRecurring: source.isRecurring,
+        frequency: source.frequency || 'Monthly',
+        kind: source.kind,
+        confirmed: true,
+        expectedDate: new Date().toISOString(),
+        recurrenceType: source.isRecurring ? 'recurring' : 'one_time',
+      }).catch(() => {});
+      saveIncome({
         activeDailyBudget: Math.floor(monthlyPool / 30),
+        monthlyPool,
         salaryConfirmed: true,
-        incomeConfirmedAt: new Date(),
+        confirmedIncome: confirmedIncome + source.amount,
       }).catch(() => {});
     },
     [addIncomeHistory, expandedTop, pulseScale, pulsingSourceId, sheetTop, monthlyPool],
@@ -680,35 +645,28 @@ export const IncomeEngineScreen: React.FC<IncomeEngineScreenProps> = ({
           : item,
       ),
     );
-    const savedUserId = await AsyncStorage.getItem('wos_user_id');
-    const userId = FIRESTORE_USER_ID || savedUserId;
-    if (FIRESTORE_PROJECT_ID && userId) {
-      const docUrl = `https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/(default)/documents/users/${userId}/income/${sourceId}`;
-      const nextExpected = parseSourceDate(sourceEditSheet.date.trim()) || new Date();
-      const patchBody = {
-        fields: {
-          name: { stringValue: sourceEditSheet.title.trim() || sourceEditSheet.source.title },
-          category: { stringValue: sourceEditSheet.category },
-          amount: { doubleValue: Number(nextAmount) },
-          expected_date: { timestampValue: (nextExpected || new Date()).toISOString() },
-        },
-      };
-      console.log('Saving to path:', `users/${userId}/income/${sourceId}`);
-      console.log('New values:', patchBody);
-      await fetch(docUrl, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(patchBody),
-      }).catch(() => null);
-      console.log('Save complete');
-      await refreshIncomeDocs();
-    }
+    const nextExpected = parseSourceDate(sourceEditSheet.date.trim()) || new Date();
+    await upsertIncomeSource({
+      id: sourceId,
+      title: sourceEditSheet.title.trim() || sourceEditSheet.source.title,
+      category: sourceEditSheet.category,
+      amount: Math.round(nextAmount),
+      date: sourceEditSheet.date.trim() || sourceEditSheet.source.date,
+      isRecurring: sourceEditSheet.source.isRecurring,
+      frequency: sourceEditSheet.source.frequency || 'Monthly',
+      kind: sourceEditSheet.source.kind,
+      confirmed: sourceEditSheet.source.status === 'Verified',
+      expectedDate: nextExpected.toISOString(),
+      recurrenceType: sourceEditSheet.source.isRecurring ? 'recurring' : 'one_time',
+    });
+    await refreshIncomeDocs();
     setSourceEditSheet(prev => ({ ...prev, visible: false, source: null }));
   };
 
   const onDeleteSource = (source: IncomeSource) => {
     safeImpact(Haptics.ImpactFeedbackStyle.Medium);
     setIncomeDocs(prev => prev.filter(item => item.id !== source.id));
+    deleteIncomeSource(source.id).catch(() => {});
     const linkedEntries = incomeHistory.filter(item => item.sourceId === source.id);
     linkedEntries.forEach(entry => {
       deleteIncomeHistory(entry.id);
@@ -749,26 +707,21 @@ export const IncomeEngineScreen: React.FC<IncomeEngineScreenProps> = ({
     if (!incomeName.trim() || !Number.isFinite(amountNum) || amountNum <= 0) return;
     const id = `${incomeCategory.toLowerCase().replace(/\s/g, '-')}-${Date.now()}`;
     const expected = parseSourceDate(incomeDate) || new Date();
-    const savedUserId = await AsyncStorage.getItem('wos_user_id');
-    const userId = FIRESTORE_USER_ID || savedUserId;
-    if (FIRESTORE_PROJECT_ID && userId) {
-      const docUrl = `https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/(default)/documents/users/${userId}/income/${id}`;
-      await fetch(docUrl, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          fields: {
-            name: { stringValue: incomeName.trim() },
-            category: { stringValue: incomeCategory },
-            amount: { doubleValue: Math.round(amountNum) },
-            recurrence_type: { stringValue: incomeRecurringType === 'Recurring' ? 'recurring' : 'one_time' },
-            frequency: { stringValue: incomeRecurringType === 'Recurring' ? incomeFrequency : 'none' },
-            expected_date: { timestampValue: expected.toISOString() },
-            confirmed: { booleanValue: false },
-          },
-        }),
-      }).catch(() => null);
-    }
+    const recurrenceType = incomeRecurringType === 'Recurring' ? 'recurring' : 'one_time';
+    const frequency = incomeRecurringType === 'Recurring' ? incomeFrequency : 'none';
+    await upsertIncomeSource({
+      id,
+      title: incomeName.trim(),
+      category: incomeCategory,
+      amount: Math.round(amountNum),
+      date: incomeDate,
+      isRecurring: incomeRecurringType === 'Recurring',
+      frequency,
+      kind: incomeCategory === 'Salary' ? 'salary' : 'freelance',
+      confirmed: false,
+      expectedDate: expected.toISOString(),
+      recurrenceType,
+    });
     setIncomeDocs(prev => [
       {
         id,
@@ -777,8 +730,8 @@ export const IncomeEngineScreen: React.FC<IncomeEngineScreenProps> = ({
         amount: Math.round(amountNum),
         confirmed: false,
         expectedDate: expected,
-        recurrenceType: incomeRecurringType === 'Recurring' ? 'recurring' : 'one_time',
-        frequency: incomeRecurringType === 'Recurring' ? incomeFrequency : 'none',
+        recurrenceType,
+        frequency,
       },
       ...prev,
     ]);

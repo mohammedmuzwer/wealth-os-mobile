@@ -9,10 +9,24 @@ import {
   View, Text, StyleSheet,
   StatusBar, TouchableOpacity, Animated, Easing, useWindowDimensions, Dimensions,
   Modal, Pressable, TextInput, Switch, Platform, PanResponder, RefreshControl,
-  AppState, type AppStateStatus, ScrollView,
+  ActivityIndicator,
+  AppState, type AppStateStatus,
+  type ViewStyle,
 } from 'react-native';
 import Slider from '@react-native-community/slider';
-import Reanimated, { useSharedValue, useAnimatedStyle, withSpring } from 'react-native-reanimated';
+import Reanimated, {
+  useSharedValue,
+  useAnimatedStyle,
+  useAnimatedReaction,
+  withSpring,
+  withTiming,
+  useAnimatedScrollHandler,
+  interpolate,
+  Extrapolation,
+  runOnJS,
+  Easing as ReanimatedEasing,
+} from 'react-native-reanimated';
+import { BlurView } from 'expo-blur';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -22,8 +36,13 @@ import { useFinancials } from '../hooks/useFinancials';
 import { useWealth } from '../context/WealthContext';
 import { IncomeEngineScreen } from './IncomeEngineScreen';
 import { WealthScreen } from './WealthScreen';
+import { WealthInsuranceScreen, WealthLoansScreen } from './WealthSubScreens';
 import { MoreScreen } from './MoreScreen';
+import { SpendingScreen } from './SpendingScreen';
 import { updateUserSettingsFirestoreRecord } from '../services/incomeHistorySync';
+import { useSpendingFirestoreData } from '../hooks/useSpendingFirestoreData';
+import { expenseEvents } from '../events/expenseEvents';
+import { saveExpense, getIncome, getSettings } from '../utils/localStorage';
 import {
   SHIELD_RED, BUILD_GREEN, VAULT_GOLD, PURPLE, NAVY,
   TEXT_PRIMARY, TEXT_MUTED,
@@ -90,27 +109,12 @@ const EXPANDED_PILL_ROW_MIN = 58;
 const EXPANDED_PILLS_TOP = SHEET_HANDLE_H + SHEET_SECTION_GAP;
 const EXPANDED_ACTIVITY_TOP = EXPANDED_PILLS_TOP + EXPANDED_PILL_ROW_MIN + SHEET_SECTION_GAP;
 
-// ─── Dummy ledger (12 items) ────────────────────────────────────────────────
+// ─── Ledger item type ────────────────────────────────────────────────────────
 
 interface Tx {
   id: string; emoji: string; iconBg: string;
   name: string; sub: string; amount: number; positive: boolean; ts: number;
 }
-
-const DUMMY_TRANSACTIONS: Tx[] = [
-  { id: '1',  emoji: '☕', iconBg: '#FEF3E8', name: 'Costa Coffee',    sub: '08:30 AM · Café',          amount: 320,  positive: false, ts: 0 },
-  { id: '2',  emoji: '🍱', iconBg: '#E8F0FE', name: 'Zomato',          sub: '01:15 PM · Food',          amount: 450,  positive: false, ts: 0 },
-  { id: '3',  emoji: '⛽', iconBg: '#F0E8FE', name: 'BPCL Fuel',       sub: '06:45 PM · Transport',     amount: 1200, positive: false, ts: 0 },
-  { id: '4',  emoji: '🚌', iconBg: '#E8F8F0', name: 'Metro Recharge',  sub: '09:00 AM · Transport',     amount: 200,  positive: false, ts: 0 },
-  { id: '5',  emoji: '☕', iconBg: '#FEF3E8', name: 'Starbucks',       sub: '10:20 AM · Café',          amount: 380,  positive: false, ts: 0 },
-  { id: '6',  emoji: '🥪', iconBg: '#FFF8E8', name: 'Subway',          sub: '12:45 PM · Food',          amount: 290,  positive: false, ts: 0 },
-  { id: '7',  emoji: '📱', iconBg: '#E8E8FE', name: 'Mobile Prepaid',  sub: '02:10 PM · Utilities',     amount: 499,  positive: false, ts: 0 },
-  { id: '8',  emoji: '🏪', iconBg: '#F0FEE8', name: 'Quick Mart',      sub: '04:30 PM · Shopping',      amount: 160,  positive: false, ts: 0 },
-  { id: '9',  emoji: '🍜', iconBg: '#FEE8F0', name: 'Swiggy',          sub: '08:00 PM · Food',          amount: 520,  positive: false, ts: 0 },
-  { id: '10', emoji: '🎬', iconBg: '#E8F0FE', name: 'Movie Tickets',   sub: '09:15 PM · Entertainment', amount: 850,  positive: false, ts: 0 },
-  { id: '11', emoji: '🚗', iconBg: '#E8E8FE', name: 'Uber',            sub: '07:20 PM · Transport',     amount: 340,  positive: false, ts: 0 },
-  { id: '12', emoji: '🛒', iconBg: '#FEF3E8', name: 'DMart',           sub: 'Sat · Groceries',          amount: 2840, positive: false, ts: 0 },
-];
 
 // ─── Animated ring segments ───────────────────────────────────────────────────
 
@@ -396,7 +400,147 @@ const snapPocketSplit = (n: number) =>
   Math.round(Math.max(10, Math.min(90, Math.round(n))) / 5) * 5;
 
 /** Shared spring for strip heights + pocket button scale */
-const STRIP_SPRING = { damping: 16, stiffness: 120, mass: 0.8 };
+const STRIP_SPRING = { damping: 20, stiffness: 180, mass: 0.6 };
+/** White home sheet snap — spring + velocity (closer to native sheet / expense modal feel than fixed timing). */
+const HOME_SHEET_SPRING = {
+  friction: 10,
+  tension: 68,
+  overshootClamping: true,
+  useNativeDriver: false,
+} as const;
+/**
+ * Levitating nav: nested capsules — outer radius follows inner so corners stay concentric:
+ * `FOOTER_NAV_OUTER_R = FOOTER_NAV_INNER_PILL_R + FOOTER_NAV_NEST_GUTTER` (outer height = inner + 2×gutter).
+ */
+const FOOTER_NAV_INNER_PILL_H = 40;
+const FOOTER_NAV_INNER_PILL_R = FOOTER_NAV_INNER_PILL_H / 2;
+const FOOTER_NAV_NEST_GUTTER = 6;
+const FOOTER_NAV_OUTER_H = FOOTER_NAV_INNER_PILL_H + FOOTER_NAV_NEST_GUTTER * 2;
+const FOOTER_NAV_OUTER_R = FOOTER_NAV_OUTER_H / 2;
+/** Horizontal inset so the bar floats away from screen side edges. */
+const FOOTER_PILL_H_INSET = 22;
+/** Gap from safe-area bottom to the bottom edge of the pill (levitation). */
+const FOOTER_PILL_ABOVE_HOME = 12;
+/** Extra space above pill top for scroll / FAB clearance (see `tabBarHeight`). */
+const FOOTER_SCROLL_CLEARANCE = 14;
+/** Muted icon for inactive tabs (outline style). */
+const FOOTER_NAV_ICON_MUTED = '#4A4A5C';
+
+/**
+ * Active tab inner pill — neutral frosted glass (icon + label stay in one horizontal row, colored).
+ */
+const FOOTER_GLASS_ACTIVE_PILL: ViewStyle = {
+  height: FOOTER_NAV_INNER_PILL_H,
+  borderRadius: FOOTER_NAV_INNER_PILL_R,
+  overflow: 'hidden',
+  flexDirection: 'row',
+  alignItems: 'center',
+  justifyContent: 'center',
+  backgroundColor: 'rgba(255, 255, 255, 0.52)',
+  borderWidth: 1,
+  borderColor: 'rgba(255, 255, 255, 0.92)',
+  shadowColor: '#000',
+  shadowOffset: { width: 0, height: 1 },
+  shadowOpacity: 0.07,
+  shadowRadius: 5,
+  elevation: 3,
+};
+
+const FOOTER_GLASS_ACTIVE_SHEEN: ViewStyle = {
+  position: 'absolute',
+  top: 0,
+  left: 0,
+  right: 0,
+  height: '46%',
+  borderTopLeftRadius: FOOTER_NAV_INNER_PILL_R,
+  borderTopRightRadius: FOOTER_NAV_INNER_PILL_R,
+  backgroundColor: 'rgba(255, 255, 255, 0.34)',
+};
+
+const FOOTER_GLASS_BACK_CHIP: ViewStyle = {
+  width: FOOTER_NAV_INNER_PILL_H,
+  height: FOOTER_NAV_INNER_PILL_H,
+  borderRadius: FOOTER_NAV_INNER_PILL_R,
+  alignItems: 'center',
+  justifyContent: 'center',
+  overflow: 'hidden',
+  backgroundColor: 'rgba(255, 255, 255, 0.38)',
+  borderWidth: 1,
+  borderColor: 'rgba(255, 255, 255, 0.75)',
+};
+
+const L1_TABS = [
+  {
+    name: 'Home' as const,
+    icon: 'home' as const,
+    iconOutline: 'home-outline' as const,
+    accent: '#E5484D',
+  },
+  {
+    name: 'Spend' as const,
+    icon: 'card' as const,
+    iconOutline: 'card-outline' as const,
+    accent: '#0D9488',
+  },
+  {
+    name: 'Wealth' as const,
+    icon: 'trending-up' as const,
+    iconOutline: 'trending-up-outline' as const,
+    accent: '#6C63FF',
+  },
+  {
+    name: 'IE' as const,
+    icon: 'flash' as const,
+    iconOutline: 'flash-outline' as const,
+    accent: '#EA580C',
+  },
+  {
+    name: 'More' as const,
+    icon: 'ellipsis-horizontal' as const,
+    iconOutline: 'ellipsis-horizontal-outline' as const,
+    accent: '#DB2777',
+  },
+];
+
+type WealthSubRoute = 'investment' | 'insurance' | 'loans';
+type WealthBarTabName = 'Investment' | 'Insurance' | 'Loans';
+
+const WEALTH_BAR_TABS: Array<{
+  name: WealthBarTabName;
+  icon: React.ComponentProps<typeof Ionicons>['name'];
+  iconOutline: React.ComponentProps<typeof Ionicons>['name'];
+  color: string;
+  route: WealthSubRoute;
+}> = [
+  {
+    name: 'Investment',
+    icon: 'trending-up',
+    iconOutline: 'trending-up-outline',
+    color: '#6C63FF',
+    route: 'investment',
+  },
+  {
+    name: 'Insurance',
+    icon: 'shield-checkmark',
+    iconOutline: 'shield-checkmark-outline',
+    color: '#16A34A',
+    route: 'insurance',
+  },
+  {
+    name: 'Loans',
+    icon: 'wallet',
+    iconOutline: 'wallet-outline',
+    color: '#DC2626',
+    route: 'loans',
+  },
+];
+
+const BAR_CROSSFADE_MS = 250;
+/** Must use Reanimated Easing — RN `Easing` is not a worklet inside `withTiming`. */
+const BAR_CROSSFADE_EASING = ReanimatedEasing.out(ReanimatedEasing.cubic);
+/** Side-by-side strips when sheet expanded (icon + labels only, no progress / Pocket Now). */
+const STRIP_ROW_EXP_H = 68;
+const COMPACT_STRIP_THRESHOLD = 60;
 
 const EXPENSE_LOG_KEY = 'wos_expense_log';
 const INCOME_SOURCES_KEY = 'income_engine_sources_v1';
@@ -680,24 +824,77 @@ export const HomeScreen: React.FC = () => {
   /** SafeAreaView already applies top inset — align with Wealth/IE “peek” sheet, not double-count safe area. */
   const expandedTop = 8;
   const SIDE_MARGIN = Math.round(SCREEN_WIDTH * 0.08);
+  /** Expanded side-by-side cards: shared inner inset (+5% vs 8px → 9) + icon–text gap. */
+  const EXPANDED_STRIP_PAD_X = Math.ceil(8 * 1.05);
+  const EXPANDED_STRIP_INNER_GAP = Math.ceil(8 * 1.05);
 
   const homeSheetTop = useRef(new Animated.Value(minimizedTop)).current;
   const homeSheetPanStartRef = useRef(minimizedTop);
   const homeSheetCurrentTopRef = useRef(minimizedTop);
   /** Mirrors `homeSheetTop` for gesture checks without reading private Animated APIs. */
   const homeSheetTopTrackedRef = useRef(minimizedTop);
-  const scrollY = useRef(new Animated.Value(0)).current;
+  const whiteScrollY = useSharedValue(0);
+  /** Bottom bar: 0 = Level 1 visible, 1 = Wealth Level 2 row visible. */
+  const swapAnim = useSharedValue(0);
+  /** 0 = sheet minimized (strips stacked), 1 = sheet fully expanded (strips wide) — follows sheet top continuously. */
+  const sheetExpandedSV = useSharedValue(0);
+  /** When false, sheet is far enough up that budget/pocket panel chrome should hide (matches old “wide strips” band). */
+  const [stripsInStackedLayout, setStripsInStackedLayout] = useState(true);
+  const prevStripsStackedRef = useRef(true);
+  /** Fire `setSheetActivePanel(null)` once per “enter expanded band” so sliders don’t sit under wide strips. */
+  const expandClosePanelLatchRef = useRef(false);
   const scrollYValueRef = useRef(0);
   /** Let expanded activity tabs receive touches only when sheet is scrolled up (opacity > 0). */
   const [activityTabUi, setActivityTabUi] = useState<TabKey>('Daily');
   const [activeNav, setActiveNav] = useState<NavKey>('home');
   const [activeRootTab, setActiveRootTab] = useState<'Home' | 'IncomeEngine' | 'Wealth' | 'More'>('Home');
+  /** Bottom bar: 1 = main tabs, 2 = Wealth sub-tabs (same bar slot). */
+  const [navLevel, setNavLevel] = useState<1 | 2>(1);
+  const [wealthSubRoute, setWealthSubRoute] = useState<WealthSubRoute>('investment');
+  const [activeWealthTab, setActiveWealthTab] = useState<WealthBarTabName>('Investment');
   const [sheetActivePanel, setSheetActivePanel] = useState<'budget' | 'pocket' | null>(null);
+  /** Mirrors `sheetActivePanel` for strip height worklets (0 none, 1 budget, 2 pocket). */
+  const activePanelSV = useSharedValue(0);
+  /** Smoothed strip heights — spring on panel open/close; follow sheet morph when no panel. */
+  const budgetStripHeightSV = useSharedValue(48);
+  const pocketStripHeightSV = useSharedValue(44);
   const [confirmedIncomeForBudget, setConfirmedIncomeForBudget] = useState(0);
+  const [localAllocationPct, setLocalAllocationPct] = useState(Math.max(1, Math.min(50, monthlyAllocationPercent || 10)));
+  const [previewDaily, setPreviewDaily] = useState(Math.max(0, activeDailyBudget || 0));
+  const [previewPool, setPreviewPool] = useState(0);
   const [pocketSplitDraft, setPocketSplitDraft] = useState(50);
   const [localAutoMode, setLocalAutoMode] = useState(true);
   const [incomeActivity, setIncomeActivity] = useState<IncomeSourceLog[]>([]);
   const [expenseActivity, setExpenseActivity] = useState<Expense[]>([]);
+
+  // Live Firestore transactions — primary data source for activity feed + SHIELD ring
+  const { expenses: firestoreExpenses, loading: txLoading } = useSpendingFirestoreData(activeDailyBudget || 0);
+  useEffect(() => {
+    if (txLoading) return;
+    const mapped: Expense[] = firestoreExpenses.map(e => ({
+      id: e.id,
+      category: (e.category as ExpenseCategory) || 'other',
+      amount: e.amount,
+      date: e.date.toISOString(),
+      note: e.name,
+      tag: e.tag === 'system' ? 'variable' : e.tag,
+    }));
+    setExpenseActivity(mapped);
+
+    // Sync today's actual spend from Firestore → WealthContext → SHIELD ring.
+    // This replaces any manual setDailySpent calls with the authoritative value.
+    const today = new Date();
+    const todaySpend = firestoreExpenses
+      .filter(
+        e =>
+          e.date.getFullYear() === today.getFullYear() &&
+          e.date.getMonth() === today.getMonth() &&
+          e.date.getDate() === today.getDate(),
+      )
+      .reduce((s, e) => s + e.amount, 0);
+    setDailySpent(todaySpend);
+  }, [txLoading, firestoreExpenses, setDailySpent]);
+
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [coinAnims, setCoinAnims] = useState<CoinAnim[]>([]);
   const coinAnimIdRef = useRef(0);
@@ -718,6 +915,70 @@ export const HomeScreen: React.FC = () => {
   /** ~20% of screen — scales all scroll-linked transitions (replaces fixed 80–120px band). */
   const sa = scrollAnimSpanPx(screenHeight);
   const sk = sa / 120;
+
+  const syncScrollYRef = useCallback((y: number) => {
+    scrollYValueRef.current = y;
+  }, []);
+
+  const whiteCardScrollHandler = useAnimatedScrollHandler(
+    {
+      onScroll: e => {
+        whiteScrollY.value = e.contentOffset.y;
+        runOnJS(syncScrollYRef)(e.contentOffset.y);
+      },
+    },
+    [syncScrollYRef],
+  );
+
+  const footerAnimatedStyle = useAnimatedStyle(() => {
+    const ty = interpolate(whiteScrollY.value, [0, 100 * sk], [0, 150], Extrapolation.CLAMP);
+    return { transform: [{ translateY: ty }] };
+  }, [sk]);
+
+  const l1BarCrossStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(swapAnim.value, [0, 1], [1, 0], Extrapolation.CLAMP),
+    transform: [{ translateX: interpolate(swapAnim.value, [0, 1], [0, -30], Extrapolation.CLAMP) }],
+  }));
+
+  const l2BarCrossStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(swapAnim.value, [0, 1], [0, 1], Extrapolation.CLAMP),
+    transform: [{ translateX: interpolate(swapAnim.value, [0, 1], [30, 0], Extrapolation.CLAMP) }],
+  }));
+
+  const compactStripHeaderStyle = useAnimatedStyle(() => {
+    const scrollIn = interpolate(
+      whiteScrollY.value,
+      [COMPACT_STRIP_THRESHOLD - 8, COMPACT_STRIP_THRESHOLD + 16],
+      [0, 1],
+      Extrapolation.CLAMP,
+    );
+    const sheetExp = sheetExpandedSV.value;
+    const ty = interpolate(
+      whiteScrollY.value,
+      [COMPACT_STRIP_THRESHOLD - 8, COMPACT_STRIP_THRESHOLD + 16],
+      [-10, 0],
+      Extrapolation.CLAMP,
+    );
+    return {
+      opacity: scrollIn * (1 - sheetExp),
+      transform: [{ translateY: ty * (1 - sheetExp) }],
+      width: '100%' as const,
+      flexDirection: 'row' as const,
+    };
+  });
+
+  const originalStripsOpacityStyle = useAnimatedStyle(() => {
+    const scrollFade = interpolate(
+      whiteScrollY.value,
+      [COMPACT_STRIP_THRESHOLD - 4, COMPACT_STRIP_THRESHOLD + 12],
+      [1, 0],
+      Extrapolation.CLAMP,
+    );
+    const m = sheetExpandedSV.value;
+    return {
+      opacity: interpolate(m, [0, 0.22], [scrollFade, 1], Extrapolation.CLAMP),
+    };
+  });
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -860,183 +1121,26 @@ export const HomeScreen: React.FC = () => {
         const savedUserId = await AsyncStorage.getItem('wos_user_id');
         const userId = FIRESTORE_USER_ID || savedUserId;
         if (userId && mounted) setFirestoreUserId(userId);
-        if (!FIRESTORE_PROJECT_ID || !userId) {
-          if (mounted) {
-            setConfirmedIncomeForBudget(totalIncome);
-            setShieldSettings({
-              activeDailyBudget,
-              salaryConfirmed: localSalaryConfirmed,
-              incomeConfirmedAt: null,
-              dailySpent,
-            });
-          }
-          return;
-        }
-        const docUrl = `https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/(default)/documents/users/${userId}/settings`;
-        const trackUrl = buildTrackDocUrl(userId);
-        const vaultUrl = buildVaultSummaryUrl(userId);
-        const dailyScoresUrl = `https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/(default)/documents/users/${userId}/gamification/daily_scores`;
-        const profileUrl = `https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/(default)/documents/users/${userId}/profile`;
-        const incomeUrl = `https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/(default)/documents/users/${userId}/income`;
-        const [settingsRes, trackRes, vaultRes, dailyScoresRes, profileRes, incomeRes] = await Promise.all([
-          fetch(docUrl),
-          fetch(trackUrl),
-          fetch(vaultUrl),
-          fetch(dailyScoresUrl),
-          fetch(profileUrl),
-          fetch(incomeUrl),
-        ]);
-        if (!settingsRes.ok) return;
-        const doc = await settingsRes.json();
-        const trackDoc = trackRes.ok ? await trackRes.json() : null;
-        const vaultDoc = vaultRes.ok ? await vaultRes.json() : null;
-        const dailyScoresDoc = dailyScoresRes.ok ? await dailyScoresRes.json() : null;
-        const profileDoc = profileRes.ok ? await profileRes.json() : null;
-        const fields = doc?.fields ?? {};
-        const trackFields = trackDoc?.fields ?? {};
-        const vaultFields = vaultDoc?.fields ?? {};
-        const scoreFields = dailyScoresDoc?.fields ?? {};
-        const profileFields = profileDoc?.fields ?? {};
-        const incomeDocs = incomeRes.ok ? (await incomeRes.json())?.documents ?? [] : [];
-        const salaryConfirmedParsed = getFirestoreBoolean(fields.salaryConfirmed);
-        const activeDailyBudgetParsed = getFirestoreNumber(fields.activeDailyBudget);
-        const allocationPctRaw = getFirestoreNumber(fields.allocationPct);
-        const allocationPctParsed = typeof allocationPctRaw === 'number' ? allocationPctRaw : 10;
-        const nowMonth = new Date().getMonth();
-        const nowYear = new Date().getFullYear();
-        let confirmedIncome = 0;
-        for (const incomeDoc of incomeDocs) {
-          const f = incomeDoc?.fields || {};
-          const rawName = String(f.name?.stringValue || f.title?.stringValue || '');
-          const amount = getFirestoreNumber(f.amount);
-          const confirmed = getFirestoreBoolean(f.confirmed);
-          const expected = getFirestoreTimestamp(f.expected_date) || getFirestoreTimestamp(f.confirmed_at);
-          const safeAmount = typeof amount === 'number' ? amount : 0;
-          if (/^dff$/i.test(rawName.trim()) && safeAmount >= 5000000) {
-            const id = String(incomeDoc?.name || '').split('/').pop();
-            if (id) {
-              const delUrl = `https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/(default)/documents/users/${userId}/income/${id}`;
-              fetch(delUrl, { method: 'DELETE' }).catch(() => {});
-            }
-            continue;
-          }
-          if (!confirmed) continue;
-          if (expected && (expected.getMonth() !== nowMonth || expected.getFullYear() !== nowYear)) continue;
-          confirmedIncome += Math.max(0, safeAmount);
-        }
-        const monthlyPool = Math.floor(confirmedIncome * (Math.max(1, Math.min(50, allocationPctParsed)) / 100));
-        const computedDailyBudget = Math.floor(monthlyPool / 30);
-        const incomeConfirmedAtParsed = getFirestoreTimestamp(fields.incomeConfirmedAt);
-        const pocketSplitParsed = getFirestoreNumber(fields.pocketSplitPct);
-        console.log('shield/settings salaryConfirmed raw:', fields.salaryConfirmed);
-        console.log('shield/settings salaryConfirmed parsed:', salaryConfirmedParsed);
-        console.log('shield/settings activeDailyBudget parsed:', activeDailyBudgetParsed);
-        console.log('shield/settings incomeConfirmedAt parsed:', incomeConfirmedAtParsed);
+
+        const [incomeData, settings] = await Promise.all([getIncome(), getSettings()]);
         if (!mounted) return;
-        setConfirmedIncomeForBudget(confirmedIncome);
+
+        const confirmedIncome = incomeData.confirmedIncome || 0;
+        setConfirmedIncomeForBudget(confirmedIncome > 0 ? confirmedIncome : totalIncome);
         setShieldSettings({
-          activeDailyBudget: Number.isFinite(computedDailyBudget) ? computedDailyBudget : (activeDailyBudgetParsed ?? activeDailyBudget),
-          salaryConfirmed: salaryConfirmedParsed ?? localSalaryConfirmed,
-          incomeConfirmedAt: incomeConfirmedAtParsed,
-          dailySpent: getFirestoreNumber(fields.dailySpent) ?? dailySpent,
+          activeDailyBudget: incomeData.activeDailyBudget || activeDailyBudget,
+          salaryConfirmed: incomeData.salaryConfirmed || localSalaryConfirmed,
+          incomeConfirmedAt: null,
+          dailySpent,
         });
-        console.log('confirmedIncome:', confirmedIncome);
-        console.log('allocationPct:', allocationPctParsed);
-        console.log('monthlyPool:', monthlyPool);
-        console.log('dailyBudget:', computedDailyBudget);
-        const nextPocket = pocketSplitParsed !== null
-          ? Math.max(10, Math.min(90, Math.round(pocketSplitParsed)))
-          : 50;
+        const nextPocket = Math.max(10, Math.min(90, Math.round(settings.pocketSplitPct || 50)));
         setPocketSplitPct(nextPocket);
         setPocketSplitDraft(nextPocket);
-        setMonthlyAllocationPercent(Math.max(1, Math.min(50, Math.round(allocationPctParsed))));
-        const macroFromDaily =
-          getFirestoreNumber(scoreFields.macroScore) ??
-          getFirestoreNumber(scoreFields.macro_score);
-        const ovrFromDaily = getFirestoreNumber(scoreFields.ovrScore);
-        const ovrFromProfile = getFirestoreNumber(profileFields.ovrScore);
-        setFirestoreMacroScore(
-          typeof macroFromDaily === 'number' ? Math.max(0, Math.min(60, Math.round(macroFromDaily))) : null,
-        );
-        const resolvedOvr = ovrFromDaily ?? ovrFromProfile;
-        setFirestoreOvrScore(
-          typeof resolvedOvr === 'number' ? Math.max(0, Math.min(100, Math.round(resolvedOvr))) : null,
-        );
-        const todayStr = new Date().toDateString();
-        const remoteLastActiveDate = getFirestoreString(trackFields.lastActiveDate) ?? todayStr;
-        const incomingTrackLevel = getFirestoreNumber(fields.trackLevel) ?? 4;
-        const nextTrackDefaults: TrackRingData = {
-          trackLevel: incomingTrackLevel,
-          activeMinutesToday: 0,
-          entriesToday: 0,
-          lastActiveDate: todayStr,
-        };
-        if (!trackRes.ok) {
-          setFirestoreMinutes(0);
-          setTrackData(nextTrackDefaults);
-          patchTrackRingDoc(userId, {
-            activeMinutesToday: 0,
-            entriesToday: 0,
-            lastActiveDate: todayStr,
-          }).catch(() => {});
-          return;
+        if (incomeData.allocationPct) {
+          setMonthlyAllocationPercent(Math.max(1, Math.min(50, Math.round(incomeData.allocationPct))));
         }
-        if (remoteLastActiveDate !== todayStr) {
-          setFirestoreMinutes(0);
-          setTrackData(nextTrackDefaults);
-          patchTrackRingDoc(userId, {
-            activeMinutesToday: 0,
-            entriesToday: 0,
-            lastActiveDate: todayStr,
-          }).catch(() => {});
-        } else {
-          const remoteMinutes = getFirestoreNumber(trackFields.activeMinutesToday) ?? 0;
-          setFirestoreMinutes(remoteMinutes);
-          setTrackData({
-            trackLevel: incomingTrackLevel,
-            activeMinutesToday: remoteMinutes,
-            entriesToday: getFirestoreNumber(trackFields.entriesToday) ?? 0,
-            lastActiveDate: remoteLastActiveDate,
-          });
-        }
-
-        const incomingLockTarget = getFirestoreNumber(vaultFields.lockTarget) ?? Math.max(0, totalIncome * 0.1);
-        const lastPocketDate = getFirestoreString(vaultFields.lastPocketDate) ?? todayStr;
-        if (!vaultRes.ok) {
-          const defaults: VaultSummary = {
-            pocketedToday: 0,
-            totalPocketed: 0,
-            lockTarget: incomingLockTarget,
-            locked: true,
-            lastPocketDate: todayStr,
-          };
-          setVaultSummary(defaults);
-          patchVaultSummaryDoc(userId, defaults).catch(() => {});
-          console.log('vault/summary created with defaults');
-        } else {
-          const rawPocketedToday = getFirestoreNumber(vaultFields.pocketedToday) ?? 0;
-          const nextPocketedToday = lastPocketDate === todayStr ? rawPocketedToday : 0;
-          setVaultSummary({
-            pocketedToday: nextPocketedToday,
-            totalPocketed: getFirestoreNumber(vaultFields.totalPocketed) ?? 0,
-            lockTarget: incomingLockTarget,
-            locked: getFirestoreBoolean(vaultFields.locked) ?? true,
-            lastPocketDate: todayStr,
-          });
-          if (lastPocketDate !== todayStr) {
-            patchVaultSummaryDoc(userId, {
-              pocketedToday: 0,
-              lastPocketDate: todayStr,
-            }).catch(() => {});
-          }
-          console.log('vault summary mapping check:', {
-            pocketedToday: rawPocketedToday,
-            totalPocketed: getFirestoreNumber(vaultFields.totalPocketed) ?? 0,
-            lockTarget: incomingLockTarget,
-            locked: getFirestoreBoolean(vaultFields.locked) ?? true,
-            lastPocketDate,
-          });
-        }
+        setFirestoreMacroScore(null);
+        setFirestoreOvrScore(null);
       } catch {
         if (mounted) {
           setShieldSettings({
@@ -1101,27 +1205,6 @@ export const HomeScreen: React.FC = () => {
       startTicking();
     }
   }, [isIncomeConfirmed, startTicking, stopTicking]);
-
-  useEffect(() => {
-    const id = scrollY.addListener(({ value }) => {
-      scrollYValueRef.current = value;
-    });
-    return () => scrollY.removeListener(id);
-  }, [scrollY]);
-
-  const footerTranslateY = scrollY.interpolate({
-    inputRange: [0, 100 * sk],
-    outputRange: [0, 150],
-    extrapolate: 'clamp',
-  });
-
-  const onWhiteCardScroll = useMemo(
-    () =>
-      Animated.event([{ nativeEvent: { contentOffset: { y: scrollY } } }], {
-        useNativeDriver: false,
-      }),
-    [scrollY],
-  );
 
   const transactions = useMemo<Tx[]>(() => {
     const incomeTx: Tx[] = incomeActivity.map(item => {
@@ -1496,6 +1579,31 @@ export const HomeScreen: React.FC = () => {
     }
   }, [pocketSplitPct, sheetActivePanel]);
 
+  // ── Write a new expense to AsyncStorage ─────────────────────────────────
+  // Saves to wos_expenses key and fires expenseEvents so every mounted
+  // instance of useSpendingFirestoreData refreshes automatically.
+  const writeExpenseToFirestore = useCallback(
+    async (
+      category: ExpenseCategory,
+      amount: number,
+      note: string | undefined,
+      isFixed: boolean,
+    ) => {
+      const meta = EXPENSE_UI_MAP[category] ?? EXPENSE_UI_MAP.other;
+      await saveExpense({
+        id: `exp-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        amount,
+        category: meta.label,
+        tag: isFixed ? 'fixed' : 'variable',
+        name: note || meta.label,
+        icon: meta.emoji,
+        date: new Date().toISOString(),
+      });
+      expenseEvents.emitExpenseAdded();
+    },
+    [],
+  );
+
   const submitExpense = useCallback(async () => {
     console.log('=== EXPENSE SUBMITTED ===');
     console.log('entriesToday before:', entriesTodayRef.current);
@@ -1513,6 +1621,15 @@ export const HomeScreen: React.FC = () => {
     }
     const expenseCategory = MODAL_TAG_TO_EXPENSE[selectedCategory] ?? 'food';
     if (!expenseCategory) return;
+    // Write to Firestore — primary store. This triggers an auto-refresh on all
+    // useSpendingFirestoreData instances (SpendingScreen + this screen).
+    void writeExpenseToFirestore(
+      expenseCategory,
+      amt,
+      expenseNote.trim() || undefined,
+      !!isRecurring,
+    );
+
     try {
       await addExpense(
         expenseCategory,
@@ -1537,9 +1654,10 @@ export const HomeScreen: React.FC = () => {
       const nextEntries = await incrementEntryCount();
       console.log('entriesToday after increment:', nextEntries);
     }
+    // Optimistic SHIELD ring update — corrected by Firestore refresh shortly after
     setDailySpent(prev => prev + amt);
     setIsExpenseModalVisible(false);
-  }, [addExpense, expenseAmount, expenseNote, expenseActivity, firestoreUserId, incrementEntryCount, isRecurring, selectedCategory, setDailySpent]);
+  }, [addExpense, expenseAmount, expenseNote, expenseActivity, firestoreUserId, incrementEntryCount, isRecurring, selectedCategory, setDailySpent, writeExpenseToFirestore]);
 
   const handleRefreshReset = useCallback(async () => {
     setIsRefreshing(true);
@@ -1574,18 +1692,50 @@ export const HomeScreen: React.FC = () => {
     homeSheetPanStartRef.current = minimizedTop;
     homeSheetCurrentTopRef.current = minimizedTop;
     homeSheetTopTrackedRef.current = minimizedTop;
+    prevStripsStackedRef.current = true;
+    expandClosePanelLatchRef.current = false;
+    sheetExpandedSV.value = 0;
+    budgetStripHeightSV.value = 48;
+    pocketStripHeightSV.value = 44;
+    setStripsInStackedLayout(true);
     homeSheetTop.stopAnimation();
     homeSheetTop.setValue(minimizedTop);
-  }, [minimizedTop, homeSheetTop]);
+  }, [minimizedTop, homeSheetTop, budgetStripHeightSV, pocketStripHeightSV]);
 
   useEffect(() => {
-    const id = homeSheetTop.addListener(({ value }) => {
+    const STACKED_UI_MORPH = 0.78;
+    const CLOSE_PANEL_MORPH_ENTER = 0.92;
+    const CLOSE_PANEL_MORPH_EXIT = 0.86;
+
+    const applySheetTop = (value: number) => {
       homeSheetTopTrackedRef.current = value;
-    });
+      const range = Math.max(1, minimizedTop - expandedTop);
+      const raw = (value - expandedTop) / range;
+      const stripMorph = 1 - Math.max(0, Math.min(1, raw));
+      sheetExpandedSV.value = stripMorph;
+
+      if (stripMorph >= CLOSE_PANEL_MORPH_ENTER) {
+        activePanelSV.value = 0;
+        if (!expandClosePanelLatchRef.current) {
+          expandClosePanelLatchRef.current = true;
+          setSheetActivePanel(prev => (prev !== null ? null : prev));
+        }
+      } else if (stripMorph < CLOSE_PANEL_MORPH_EXIT) {
+        expandClosePanelLatchRef.current = false;
+      }
+
+      const stacked = stripMorph < STACKED_UI_MORPH;
+      if (stacked !== prevStripsStackedRef.current) {
+        prevStripsStackedRef.current = stacked;
+        setStripsInStackedLayout(stacked);
+      }
+    };
+    const id = homeSheetTop.addListener(({ value }) => applySheetTop(value));
+    homeSheetTop.stopAnimation((value: number) => applySheetTop(value));
     return () => {
       homeSheetTop.removeListener(id);
     };
-  }, [homeSheetTop]);
+  }, [homeSheetTop, expandedTop, minimizedTop, sheetExpandedSV, activePanelSV]);
 
   const homeSheetPan = useMemo(
     () =>
@@ -1618,24 +1768,33 @@ export const HomeScreen: React.FC = () => {
           homeSheetTop.setValue(clamped);
         },
         onPanResponderRelease: (_, g) => {
-          const shouldExpand =
-            g.vy < -0.25 ||
-            homeSheetCurrentTopRef.current < expandedTop + (minimizedTop - expandedTop) * 0.68;
-          Animated.timing(homeSheetTop, {
-            toValue: shouldExpand ? expandedTop : minimizedTop,
-            duration: 220,
-            useNativeDriver: false,
+          const range = minimizedTop - expandedTop;
+          const pos = homeSheetCurrentTopRef.current;
+          const mid = expandedTop + range * 0.5;
+          let toValue: number;
+          if (g.vy < -0.22) {
+            toValue = expandedTop;
+          } else if (g.vy > 0.22) {
+            toValue = minimizedTop;
+          } else {
+            toValue = pos < mid ? expandedTop : minimizedTop;
+          }
+          const vy = Math.max(-2800, Math.min(2800, g.vy));
+          Animated.spring(homeSheetTop, {
+            toValue,
+            ...HOME_SHEET_SPRING,
+            velocity: vy,
           }).start(({ finished }) => {
             if (finished) {
-              homeSheetTopTrackedRef.current = shouldExpand ? expandedTop : minimizedTop;
+              homeSheetTopTrackedRef.current = toValue;
             }
           });
         },
         onPanResponderTerminate: () => {
-          Animated.timing(homeSheetTop, {
+          Animated.spring(homeSheetTop, {
             toValue: minimizedTop,
-            duration: 220,
-            useNativeDriver: false,
+            ...HOME_SHEET_SPRING,
+            velocity: 0,
           }).start(() => {
             homeSheetTopTrackedRef.current = minimizedTop;
           });
@@ -1644,24 +1803,184 @@ export const HomeScreen: React.FC = () => {
     [expandedTop, minimizedTop, homeSheetTop],
   );
 
-  const pocketStripHeight = useSharedValue(44);
-
   useEffect(() => {
-    if (sheetActivePanel === 'pocket') {
-      pocketStripHeight.value = withSpring(170, STRIP_SPRING);
-    } else {
-      pocketStripHeight.value = withSpring(44, STRIP_SPRING);
-    }
-  }, [sheetActivePanel, pocketStripHeight]);
+    activePanelSV.value = sheetActivePanel === 'budget' ? 1 : sheetActivePanel === 'pocket' ? 2 : 0;
+  }, [sheetActivePanel, activePanelSV]);
 
-  const pocketAnimStyle = useAnimatedStyle(() => ({
-    height: pocketStripHeight.value,
-    overflow: 'hidden',
+  const stripsRowAnimStyle = useAnimatedStyle(() => {
+    const m = sheetExpandedSV.value;
+    return {
+      flexDirection: m > 0.5 ? ('row' as const) : ('column' as const),
+      gap: interpolate(m, [0, 1], [0, EXPANDED_STRIP_INNER_GAP]),
+      paddingHorizontal: SIDE_MARGIN,
+      marginBottom: interpolate(m, [0, 1], [0, 7]),
+    };
+  });
+
+  const budgetCardMarginStyle = useAnimatedStyle(() => {
+    const m = sheetExpandedSV.value;
+    return {
+      marginBottom: interpolate(m, [0, 1], [8, 0]),
+      flex: m > 0.5 ? 1 : 0,
+      minWidth: m > 0.5 ? 0 : 0,
+    };
+  });
+
+  const pocketCardMarginStyle = useAnimatedStyle(() => {
+    const m = sheetExpandedSV.value;
+    return {
+      marginBottom: interpolate(m, [0, 1], [14, 0]),
+      flex: m > 0.5 ? 1 : 0,
+      minWidth: m > 0.5 ? 0 : 0,
+    };
+  });
+
+  /** Pocket split block: inset from strip header (~4% of window height). */
+  const pocketPanelTopPadPx = Math.round(screenHeight * 0.04);
+  /** Less space below Auto/Done than the old fixed 46 — subtract ~3% window height, keep a sensible minimum. */
+  const pocketPanelBottomPadPx = Math.max(14, Math.round(46 - screenHeight * 0.03));
+  /** Space above Auto/Manual + Done row (~1% window height). */
+  const pocketPanelAutoDoneOffsetPx = Math.round(screenHeight * 0.01);
+  /** Open pocket strip: original 188 + top inset delta − bottom padding saved + Auto/Done offset. */
+  const pocketPanelOpenStripHeight =
+    188 +
+    Math.max(0, pocketPanelTopPadPx - 4) -
+    Math.max(0, 46 - pocketPanelBottomPadPx) +
+    pocketPanelAutoDoneOffsetPx;
+
+  const pocketOpenHeightShared = useSharedValue(pocketPanelOpenStripHeight);
+  useEffect(() => {
+    pocketOpenHeightShared.value = pocketPanelOpenStripHeight;
+  }, [pocketPanelOpenStripHeight, pocketOpenHeightShared]);
+
+  useAnimatedReaction(
+    () => ({
+      p: activePanelSV.value,
+      m: sheetExpandedSV.value,
+      ph: pocketOpenHeightShared.value,
+    }),
+    (curr, prev) => {
+      'worklet';
+      const budgetTarget =
+        curr.p === 1 ? 155 : curr.p === 2 ? 48 : 48 + (STRIP_ROW_EXP_H - 48) * curr.m;
+      const pocketTarget =
+        curr.p === 2 ? curr.ph : curr.p === 1 ? 44 : 44 + (STRIP_ROW_EXP_H - 44) * curr.m;
+      const panelChanged = prev === undefined || prev === null || curr.p !== prev.p;
+      const pocketHChanged =
+        prev !== undefined && prev !== null && curr.ph !== prev.ph;
+      if (panelChanged) {
+        budgetStripHeightSV.value = withSpring(budgetTarget, STRIP_SPRING);
+        pocketStripHeightSV.value = withSpring(pocketTarget, STRIP_SPRING);
+        return;
+      }
+      if (curr.p === 2 && pocketHChanged) {
+        pocketStripHeightSV.value = withSpring(pocketTarget, STRIP_SPRING);
+        return;
+      }
+      if (curr.p === 0) {
+        budgetStripHeightSV.value = budgetTarget;
+        pocketStripHeightSV.value = pocketTarget;
+      }
+    },
+  );
+
+  const budgetAnimStyle = useAnimatedStyle(() => ({
+    height: budgetStripHeightSV.value,
+    overflow: 'hidden' as const,
   }));
 
+  const pocketAnimStyle = useAnimatedStyle(() => ({
+    height: pocketStripHeightSV.value,
+    overflow: 'hidden' as const,
+  }));
+
+  const budgetCollapsedInnerStyle = useAnimatedStyle(() => ({
+    ...StyleSheet.absoluteFillObject,
+    opacity: interpolate(sheetExpandedSV.value, [0, 0.38, 0.58], [1, 0.35, 0], Extrapolation.CLAMP),
+  }));
+
+  const budgetExpandedInnerStyle = useAnimatedStyle(() => ({
+    ...StyleSheet.absoluteFillObject,
+    opacity: interpolate(sheetExpandedSV.value, [0.22, 0.45, 0.7], [0, 0.4, 1], Extrapolation.CLAMP),
+  }));
+
+  const pocketCollapsedInnerStyle = useAnimatedStyle(() => ({
+    ...StyleSheet.absoluteFillObject,
+    opacity: interpolate(sheetExpandedSV.value, [0, 0.38, 0.58], [1, 0.35, 0], Extrapolation.CLAMP),
+  }));
+
+  const pocketExpandedInnerStyle = useAnimatedStyle(() => ({
+    ...StyleSheet.absoluteFillObject,
+    opacity: interpolate(sheetExpandedSV.value, [0.22, 0.45, 0.7], [0, 0.4, 1], Extrapolation.CLAMP),
+  }));
+
+  const stripCardBorderStyle = useAnimatedStyle(() => ({
+    borderRadius: interpolate(sheetExpandedSV.value, [0, 1], [14, 12]),
+  }));
+
+  /** Gap between strip row and Recent Activity when sheet is expanded (2% of window height at full expand). */
+  const recentActivityExpandTopGapPx = Math.round(SCREEN_HEIGHT * 0.02);
+  const recentActivityTopGapStyle = useAnimatedStyle(
+    () => ({
+      marginTop: interpolate(sheetExpandedSV.value, [0, 1], [0, recentActivityExpandTopGapPx]),
+    }),
+    [recentActivityExpandTopGapPx],
+  );
+
+  const confirmedIncome = Math.max(confirmedIncomeForBudget, totalIncome);
+
+  useEffect(() => {
+    if (sheetActivePanel !== 'budget') return;
+    console.log('confirmedIncome:', confirmedIncome);
+    console.log('allocationPct:', localAllocationPct);
+    console.log('activeDailyBudget:', activeDailyBudget);
+    console.log('dailySpent:', dailySpent);
+  }, [sheetActivePanel, confirmedIncome, localAllocationPct, activeDailyBudget, dailySpent]);
+
+  useEffect(() => {
+    if (sheetActivePanel === 'budget') return;
+    const savedPct = Math.max(1, Math.min(50, Math.round(monthlyAllocationPercent || 10)));
+    const pool = Math.floor((confirmedIncome || 0) * (savedPct / 100));
+    setLocalAllocationPct(savedPct);
+    setPreviewPool(pool);
+    setPreviewDaily(Math.floor(pool / 30));
+  }, [sheetActivePanel, monthlyAllocationPercent, confirmedIncome]);
+
+  const handleBudgetDone = useCallback(async () => {
+    const pct = Math.max(1, Math.min(50, Math.round(localAllocationPct || 10)));
+    const pool = Math.floor((confirmedIncome || 0) * (pct / 100));
+    const daily = Math.floor(pool / 30);
+    setLocalAllocationPct(pct);
+    setPreviewPool(pool);
+    setPreviewDaily(daily);
+    setMonthlyAllocationPercent(pct);
+    setCustomDailyLimit(daily);
+    await updateUserSettingsFirestoreRecord({
+      allocationPct: pct,
+      monthlyPool: pool,
+      activeDailyBudget: daily,
+    });
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+    setSheetActivePanel(null);
+  }, [
+    localAllocationPct,
+    confirmedIncome,
+    setMonthlyAllocationPercent,
+    setCustomDailyLimit,
+  ]);
+
   const openBudget = useCallback(() => {
-    setSheetActivePanel(p => (p === 'budget' ? null : 'budget'));
-  }, []);
+    setSheetActivePanel(prev => {
+      if (prev === 'budget') return null;
+      const savedPct = Math.max(1, Math.min(50, Math.round(monthlyAllocationPercent || 10)));
+      const pool = Math.floor((confirmedIncome || 0) * (savedPct / 100));
+      const daily = Math.floor(pool / 30);
+      setLocalAllocationPct(savedPct);
+      setPreviewPool(pool);
+      setPreviewDaily(daily);
+      return 'budget';
+    });
+  }, [monthlyAllocationPercent, confirmedIncome]);
   const openPocket = useCallback(() => {
     setPocketSplitDraft(snapPocketSplit(pocketSplitPct));
     setSheetActivePanel(p => (p === 'pocket' ? null : 'pocket'));
@@ -1677,41 +1996,100 @@ export const HomeScreen: React.FC = () => {
     return 'Good Evening';
   }, [currentTime]);
 
-  const navigateRoot = useCallback((screen: string) => {
+  const footerPillBottomOffset = insets.bottom + FOOTER_PILL_ABOVE_HOME;
+  const tabBarHeight = footerPillBottomOffset + FOOTER_NAV_OUTER_H + FOOTER_SCROLL_CLEARANCE;
+
+  const navigateRoot = useCallback(
+    (screen: string) => {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+      const collapseWealthBar = () => {
+        swapAnim.value = 0;
+        setNavLevel(1);
+      };
+      if (screen === 'Home') {
+        collapseWealthBar();
+        setActiveNav('home');
+        setActiveRootTab('Home');
+      } else if (screen === 'Spend') {
+        collapseWealthBar();
+        setActiveNav('spend');
+        setActiveRootTab('Home');
+      } else if (screen === 'IE' || screen === 'IncomeEngine') {
+        collapseWealthBar();
+        setActiveNav('incomeEngine');
+        setActiveRootTab('IncomeEngine');
+      } else if (screen === 'Wealth') {
+        setActiveNav('wealth');
+        setActiveRootTab('Wealth');
+      } else if (screen === 'More') {
+        collapseWealthBar();
+        setActiveNav('more');
+        setActiveRootTab('More');
+      } else if (screen === 'Profile' || screen === 'Settings' || screen === 'Support') {
+        collapseWealthBar();
+        setActiveNav('more');
+        setActiveRootTab('More');
+      }
+    },
+    [swapAnim],
+  );
+
+  const closeWealth = useCallback(() => {
+    swapAnim.value = withTiming(0, { duration: 200, easing: BAR_CROSSFADE_EASING });
+    navigateRoot('Home');
+    setTimeout(() => {
+      setNavLevel(1);
+    }, 200);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
-    if (screen === 'Home') {
-      setActiveNav('home');
-      setActiveRootTab('Home');
-    } else if (screen === 'Spend') {
-      setActiveNav('spend');
-      setActiveRootTab('Home');
-      setIsExpenseModalVisible(true);
-    } else if (screen === 'IE' || screen === 'IncomeEngine') {
-      setActiveNav('incomeEngine');
-      setActiveRootTab('IncomeEngine');
-    } else if (screen === 'Wealth') {
-      setActiveNav('wealth');
-      setActiveRootTab('Wealth');
-    } else if (screen === 'More') {
-      setActiveNav('more');
-      setActiveRootTab('More');
-    }
+  }, [navigateRoot, swapAnim]);
+
+  const openWealth = useCallback(() => {
+    swapAnim.value = withTiming(1, { duration: BAR_CROSSFADE_MS, easing: BAR_CROSSFADE_EASING });
+    setNavLevel(2);
+    setActiveWealthTab('Investment');
+    setWealthSubRoute('investment');
+    navigateRoot('Wealth');
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+  }, [navigateRoot, swapAnim]);
+
+  const onWealthSubTabPress = useCallback((route: WealthSubRoute, name: WealthBarTabName) => {
+    setActiveWealthTab(name);
+    setWealthSubRoute(route);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
   }, []);
 
-  const footerActiveName =
-    activeNav === 'home'
-      ? 'Home'
-      : activeNav === 'spend'
-        ? 'Spend'
-        : activeNav === 'incomeEngine'
-          ? 'IE'
-          : activeNav === 'wealth'
-            ? 'Wealth'
-            : activeNav === 'more'
-              ? 'More'
-              : 'Home';
+  const handleL1TabPress = useCallback(
+    (tab: (typeof L1_TABS)[number]['name']) => {
+      if (tab === 'Wealth') {
+        /** Always use L2 (Investment / Insurance / Loans) — previously IE→Wealth left nav at L1 until refresh. */
+        openWealth();
+        return;
+      }
+      if (tab === 'More') {
+        navigateRoot('More');
+        return;
+      }
+      if (tab === 'Home') navigateRoot('Home');
+      else if (tab === 'Spend') navigateRoot('Spend');
+      else if (tab === 'IE') navigateRoot('IE');
+    },
+    [navigateRoot, openWealth],
+  );
 
-  const incomeBasisForSlider = Math.max(confirmedIncomeForBudget, totalIncome);
+  const footerActiveName =
+    navLevel === 2
+      ? 'Wealth'
+      : activeNav === 'home'
+        ? 'Home'
+        : activeNav === 'spend'
+          ? 'Spend'
+          : activeNav === 'incomeEngine'
+            ? 'IE'
+            : activeNav === 'wealth'
+              ? 'Wealth'
+              : activeNav === 'more'
+                ? 'More'
+                : 'Home';
 
   const sheetBottomPad = Platform.OS === 'ios' ? 34 : 20;
   const catCols = 4;
@@ -1819,6 +2197,152 @@ export const HomeScreen: React.FC = () => {
           </View>
         ))}
       </View>
+    </>
+  );
+
+  const footerLevitatingShellBase = {
+    position: 'absolute' as const,
+    left: FOOTER_PILL_H_INSET,
+    right: FOOTER_PILL_H_INSET,
+    bottom: footerPillBottomOffset,
+    minHeight: FOOTER_NAV_OUTER_H,
+    borderRadius: FOOTER_NAV_OUTER_R,
+    overflow: 'hidden' as const,
+    zIndex: 1000,
+    elevation: 28,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 10 } as const,
+    shadowOpacity: 0.22,
+    shadowRadius: 28,
+    /** Glass pill rim — slightly cool gray so it reads on white sheets and dark Wealth screens. */
+    borderWidth: 1.5,
+    borderColor: 'rgba(120, 125, 160, 0.38)',
+  };
+
+  const footerL1SlotStyle = {
+    position: 'absolute' as const,
+    top: FOOTER_NAV_NEST_GUTTER,
+    left: FOOTER_NAV_NEST_GUTTER,
+    right: FOOTER_NAV_NEST_GUTTER,
+    bottom: FOOTER_NAV_NEST_GUTTER,
+    flexDirection: 'row' as const,
+  };
+
+  const footerL2SlotStyle = {
+    ...footerL1SlotStyle,
+    alignItems: 'center' as const,
+  };
+
+  const footerPillNavInner = (
+    <>
+      <Reanimated.View pointerEvents={navLevel === 1 ? 'auto' : 'none'} style={[footerL1SlotStyle, l1BarCrossStyle]}>
+        <View style={{ flex: 1, flexDirection: 'row' }}>
+          {L1_TABS.map(tab => {
+            const isActive = footerActiveName === tab.name;
+            return (
+              <TouchableOpacity
+                key={tab.name}
+                onPress={() => handleL1TabPress(tab.name)}
+                style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}
+                activeOpacity={0.85}
+              >
+                {isActive ? (
+                  <View style={[FOOTER_GLASS_ACTIVE_PILL, { gap: 6, paddingHorizontal: 14 }]}>
+                    <View pointerEvents="none" style={FOOTER_GLASS_ACTIVE_SHEEN} />
+                    <Ionicons name={tab.icon} size={18} color={tab.accent} style={{ zIndex: 1 }} />
+                    <Text
+                      style={{
+                        zIndex: 1,
+                        fontSize: 11,
+                        fontWeight: '700',
+                        color: tab.accent,
+                        fontFamily: FONT_UI as string,
+                      }}
+                      numberOfLines={1}
+                    >
+                      {tab.name}
+                    </Text>
+                  </View>
+                ) : (
+                  <View
+                    style={{
+                      width: FOOTER_NAV_INNER_PILL_H,
+                      height: FOOTER_NAV_INNER_PILL_H,
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                    }}
+                  >
+                    <Ionicons name={tab.iconOutline} size={22} color={FOOTER_NAV_ICON_MUTED} />
+                  </View>
+                )}
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      </Reanimated.View>
+      <Reanimated.View pointerEvents={navLevel === 2 ? 'auto' : 'none'} style={[footerL2SlotStyle, l2BarCrossStyle]}>
+        <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center' }}>
+          <TouchableOpacity
+            onPress={closeWealth}
+            accessibilityRole="button"
+            accessibilityLabel="Back to home"
+            hitSlop={{ top: 10, bottom: 10, left: 6, right: 6 }}
+            style={{ paddingVertical: 6, paddingHorizontal: 6, marginRight: 2 }}
+            activeOpacity={0.78}
+          >
+            <View style={FOOTER_GLASS_BACK_CHIP}>
+              <Ionicons name="chevron-back-outline" size={21} color={FOOTER_NAV_ICON_MUTED} />
+            </View>
+          </TouchableOpacity>
+          <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center' }}>
+            {WEALTH_BAR_TABS.map(tab => {
+              const isW = activeWealthTab === tab.name;
+              const c = tab.color;
+              return (
+                <TouchableOpacity
+                  key={tab.name}
+                  onPress={() => onWealthSubTabPress(tab.route, tab.name)}
+                  style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}
+                  activeOpacity={0.85}
+                >
+                  {isW ? (
+                    <View style={[FOOTER_GLASS_ACTIVE_PILL, { gap: 4, paddingHorizontal: 8, maxWidth: '100%' }]}>
+                      <View pointerEvents="none" style={FOOTER_GLASS_ACTIVE_SHEEN} />
+                      <Ionicons name={tab.icon} size={16} color={c} style={{ zIndex: 1 }} />
+                      <Text
+                        style={{
+                          zIndex: 1,
+                          fontSize: 9,
+                          fontWeight: '700',
+                          color: c,
+                          fontFamily: FONT_UI as string,
+                          flexShrink: 1,
+                        }}
+                        numberOfLines={1}
+                        adjustsFontSizeToFit
+                        minimumFontScale={0.75}
+                      >
+                        {tab.name}
+                      </Text>
+                    </View>
+                  ) : (
+                    <View
+                      style={{
+                        width: FOOTER_NAV_INNER_PILL_H,
+                        height: FOOTER_NAV_INNER_PILL_H,
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                      }}
+                    >
+                      <Ionicons name={tab.iconOutline} size={20} color={FOOTER_NAV_ICON_MUTED} />
+                    </View>
+                  )}
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        </View>
+      </Reanimated.View>
     </>
   );
 
@@ -2031,23 +2555,183 @@ export const HomeScreen: React.FC = () => {
             zIndex: 5,
           }}
         >
-          <View style={{ width: '100%', paddingTop: 6, paddingBottom: 6 }}>
-            <View style={{ alignItems: 'center' }}>
+          <View style={{ flex: 1, position: 'relative' }}>
+          <Reanimated.View
+            pointerEvents="box-none"
+            style={[
+              {
+                position: 'absolute',
+                top: 0,
+                left: 0,
+                right: 0,
+                width: '100%',
+                zIndex: 10,
+                backgroundColor: '#FFFFFF',
+                borderBottomWidth: StyleSheet.hairlineWidth,
+                borderBottomColor: '#F0F0F8',
+              },
+              compactStripHeaderStyle,
+            ]}
+          >
+            <View
+              style={{
+                width: '100%',
+                flexDirection: 'row',
+                flexWrap: 'nowrap',
+                alignItems: 'center',
+                paddingHorizontal: 16,
+                paddingTop: 11,
+                paddingBottom: 11,
+                gap: 10,
+              }}
+            >
+            <TouchableOpacity
+              onPress={openBudget}
+              activeOpacity={0.88}
+              style={{
+                flex: 1,
+                minWidth: 0,
+                minHeight: 68,
+                backgroundColor: '#1E1E3A',
+                borderRadius: 14,
+                paddingTop: 9,
+                paddingBottom: 14,
+                paddingHorizontal: 10,
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: 10,
+              }}
+            >
               <View
                 style={{
-                  width: 40,
-                  height: 4,
-                  backgroundColor: '#E4E2F5',
-                  borderRadius: 2,
+                  width: 36,
+                  height: 36,
+                  borderRadius: 10,
+                  backgroundColor: 'rgba(45,212,191,0.18)',
+                  alignItems: 'center',
+                  justifyContent: 'center',
                 }}
-              />
+              >
+                <Ionicons name="heart" size={18} color="#2DD4BF" />
+              </View>
+              <View style={{ flex: 1, minWidth: 0, justifyContent: 'center' }}>
+                <Text
+                  style={{
+                    fontSize: 9,
+                    color: 'rgba(255,255,255,0.45)',
+                    textTransform: 'uppercase',
+                    letterSpacing: 1,
+                    fontFamily: FONT_UI as string,
+                    includeFontPadding: false,
+                  }}
+                  numberOfLines={1}
+                >
+                  DAILY BUDGET
+                </Text>
+                {effectiveDailyBudget > 0 ? (
+                  <Text
+                    style={{
+                      fontSize: 14,
+                      fontFamily: FONT_MONO as string,
+                      fontWeight: '700',
+                      color: '#FFFFFF',
+                      marginTop: 3,
+                      includeFontPadding: false,
+                    }}
+                    numberOfLines={1}
+                  >
+                    ₹{Math.round(effectiveDailySpent)}
+                    <Text style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)', fontWeight: '500' }}>
+                      /{Math.round(effectiveDailyBudget)}
+                    </Text>
+                  </Text>
+                ) : (
+                  <Text
+                    style={{
+                      fontSize: 11,
+                      fontFamily: FONT_UI as string,
+                      fontWeight: '600',
+                      color: 'rgba(255,255,255,0.38)',
+                      marginTop: 4,
+                      includeFontPadding: false,
+                    }}
+                  >
+                    Set income first
+                  </Text>
+                )}
+              </View>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={openPocket}
+              activeOpacity={0.88}
+              style={{
+                flex: 1,
+                minWidth: 0,
+                minHeight: 72,
+                backgroundColor: '#1E1E3A',
+                borderRadius: 14,
+                paddingTop: 9,
+                paddingBottom: 15,
+                paddingHorizontal: 10,
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: 10,
+                borderWidth: 1,
+                borderColor: 'rgba(255,170,0,0.2)',
+              }}
+            >
+              <View
+                style={{
+                  width: 36,
+                  height: 36,
+                  borderRadius: 10,
+                  backgroundColor: 'rgba(255,170,0,0.18)',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              >
+                <Ionicons name="wallet-outline" size={18} color="#FFAA00" />
+              </View>
+              <View style={{ flex: 1, minWidth: 0, justifyContent: 'center' }}>
+                <Text
+                  style={{
+                    fontSize: 9,
+                    color: 'rgba(255,255,255,0.45)',
+                    textTransform: 'uppercase',
+                    letterSpacing: 1,
+                    fontFamily: FONT_UI as string,
+                    includeFontPadding: false,
+                  }}
+                  numberOfLines={1}
+                >
+                  POCKET
+                </Text>
+                <Text
+                  style={{
+                    fontSize: 14,
+                    fontFamily: FONT_MONO as string,
+                    fontWeight: '700',
+                    color: '#FFFFFF',
+                    marginTop: 3,
+                    includeFontPadding: false,
+                  }}
+                  numberOfLines={1}
+                >
+                  ₹{Math.round(pocketAvailable)}
+                </Text>
+              </View>
+            </TouchableOpacity>
             </View>
-          </View>
-          <ScrollView
+          </Reanimated.View>
+
+          <Reanimated.ScrollView
             style={{ flex: 1 }}
-            contentContainerStyle={{ paddingTop: 8, paddingBottom: 100 }}
+            contentContainerStyle={{
+              paddingTop: 8,
+              paddingBottom: tabBarHeight + 16,
+            }}
             scrollEventThrottle={16}
-            onScroll={onWhiteCardScroll}
+            onScroll={whiteCardScrollHandler}
             bounces
             scrollEnabled
             alwaysBounceVertical
@@ -2059,6 +2743,18 @@ export const HomeScreen: React.FC = () => {
               <RefreshControl refreshing={isRefreshing} onRefresh={handleRefreshReset} />
             }
           >
+            <View style={{ width: '100%', paddingTop: 6, paddingBottom: 6 }}>
+              <View style={{ alignItems: 'center' }}>
+                <View
+                  style={{
+                    width: 40,
+                    height: 4,
+                    backgroundColor: '#E4E2F5',
+                    borderRadius: 2,
+                  }}
+                />
+              </View>
+            </View>
             {insight && (
               <TouchableOpacity
                 onPress={() => insight.action && navigateRoot(insight.action)}
@@ -2095,35 +2791,157 @@ export const HomeScreen: React.FC = () => {
               </TouchableOpacity>
             )}
 
-            <View
-              style={{
-                marginHorizontal: SIDE_MARGIN,
-                marginBottom: 8,
-                backgroundColor: '#1E1E3A',
-                borderRadius: 14,
-                overflow: 'hidden',
-                borderWidth: 1,
-                borderColor: 'rgba(255,255,255,0.08)',
-              }}
+            <Reanimated.View style={originalStripsOpacityStyle}>
+            <Reanimated.View style={stripsRowAnimStyle}>
+            <Reanimated.View
+              style={[
+                {
+                  backgroundColor: '#1E1E3A',
+                  overflow: 'hidden',
+                  borderWidth: 1,
+                  borderColor: 'rgba(255,255,255,0.08)',
+                },
+                stripCardBorderStyle,
+                budgetCardMarginStyle,
+                budgetAnimStyle,
+              ]}
             >
-              <TouchableOpacity
-                onPress={openBudget}
-                activeOpacity={0.88}
-                style={{
-                  height: 48,
-                  paddingHorizontal: 14,
-                  paddingVertical: 8,
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                }}
-              >
-                <View style={{ flex: 1, marginRight: 12 }}>
+              <View style={{ flex: 1, position: 'relative' }}>
+                <Reanimated.View
+                  style={budgetCollapsedInnerStyle}
+                  pointerEvents={stripsInStackedLayout ? 'box-none' : 'none'}
+                >
+                  <TouchableOpacity
+                    onPress={openBudget}
+                    disabled={!stripsInStackedLayout}
+                    activeOpacity={stripsInStackedLayout ? 0.88 : 1}
+                    style={{
+                      height: 46,
+                      paddingHorizontal: 13,
+                      paddingVertical: 8,
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                    }}
+                  >
+                    <View style={{ flex: 1, marginRight: 11 }}>
+                      <View
+                        style={{
+                          flexDirection: 'row',
+                          justifyContent: 'space-between',
+                          marginBottom: 5,
+                        }}
+                      >
+                        <Text
+                          style={{
+                            fontSize: 10,
+                            color: 'rgba(255,255,255,0.45)',
+                            textTransform: 'uppercase',
+                            letterSpacing: 1,
+                          }}
+                        >
+                          DAILY BUDGET
+                        </Text>
+                        <Text style={{ fontSize: 12, fontFamily: FONT_MONO as string, fontWeight: '600', color: '#FFFFFF' }}>
+                          ₹{Math.round(dailySpent)}
+                          <Text style={{ color: 'rgba(255,255,255,0.4)' }}>/{Math.round(activeDailyBudget)}</Text>
+                        </Text>
+                      </View>
+                      <View
+                        style={{
+                          height: 4,
+                          backgroundColor: 'rgba(255,255,255,0.1)',
+                          borderRadius: 2,
+                          overflow: 'hidden',
+                        }}
+                      >
+                        <View
+                          style={{
+                            height: 4,
+                            borderRadius: 2,
+                            width: `${Math.min((dailySpent / Math.max(activeDailyBudget, 1)) * 100, 100)}%`,
+                            backgroundColor: '#FF3B5C',
+                          }}
+                        />
+                      </View>
+                    </View>
+                  </TouchableOpacity>
+                </Reanimated.View>
+                <Reanimated.View style={budgetExpandedInnerStyle} pointerEvents="none">
+                  <View
+                    style={{
+                      flex: 1,
+                      justifyContent: 'center',
+                      paddingHorizontal: EXPANDED_STRIP_PAD_X,
+                      paddingVertical: 4,
+                      flexDirection: 'column',
+                      alignItems: 'stretch',
+                    }}
+                  >
+                    <View
+                      style={{
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        gap: EXPANDED_STRIP_INNER_GAP,
+                        width: '100%',
+                      }}
+                    >
+                      <View
+                        style={{
+                          width: 32,
+                          height: 32,
+                          borderRadius: 8,
+                          backgroundColor: 'rgba(45,212,191,0.18)',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                        }}
+                      >
+                        <Ionicons name="heart" size={16} color="#2DD4BF" />
+                      </View>
+                      <View style={{ flex: 1, minWidth: 0, justifyContent: 'center' }}>
+                        <Text
+                          style={{
+                            fontSize: 8,
+                            color: 'rgba(255,255,255,0.45)',
+                            textTransform: 'uppercase',
+                            letterSpacing: 0.9,
+                            fontFamily: FONT_UI as string,
+                            includeFontPadding: false,
+                          }}
+                          numberOfLines={1}
+                        >
+                          DAILY BUDGET
+                        </Text>
+                        <Text
+                          style={{
+                            fontSize: 12,
+                            fontFamily: FONT_MONO as string,
+                            fontWeight: '700',
+                            color: '#FFFFFF',
+                            marginTop: 2,
+                            includeFontPadding: false,
+                          }}
+                          numberOfLines={1}
+                        >
+                          ₹{Math.round(dailySpent)}
+                          <Text style={{ fontSize: 10, color: 'rgba(255,255,255,0.45)', fontWeight: '500' }}>
+                            /{Math.round(activeDailyBudget)}
+                          </Text>
+                        </Text>
+                      </View>
+                    </View>
+                  </View>
+                </Reanimated.View>
+              </View>
+
+              {sheetActivePanel === 'budget' && stripsInStackedLayout && (
+                <View style={{ paddingHorizontal: 14, paddingBottom: 14 }}>
                   <View
                     style={{
                       flexDirection: 'row',
                       justifyContent: 'space-between',
-                      marginBottom: 5,
+                      alignItems: 'center',
+                      marginBottom: 4,
                     }}
                   >
                     <Text
@@ -2134,179 +2952,254 @@ export const HomeScreen: React.FC = () => {
                         letterSpacing: 1,
                       }}
                     >
-                      DAILY BUDGET
+                      DAILY ALLOCATION
                     </Text>
-                    <Text style={{ fontSize: 12, fontFamily: FONT_MONO as string, fontWeight: '600', color: '#FFFFFF' }}>
-                      ₹{Math.round(dailySpent)}
-                      <Text style={{ color: 'rgba(255,255,255,0.4)' }}>/{Math.round(activeDailyBudget)}</Text>
-                    </Text>
-                  </View>
-                  <View
-                    style={{
-                      height: 4,
-                      backgroundColor: 'rgba(255,255,255,0.1)',
-                      borderRadius: 2,
-                      overflow: 'hidden',
-                    }}
-                  >
-                    <View
+                    <Text
                       style={{
-                        height: 4,
-                        borderRadius: 2,
-                        width: `${Math.min((dailySpent / Math.max(activeDailyBudget, 1)) * 100, 100)}%`,
-                        backgroundColor: '#FF3B5C',
-                      }}
-                    />
-                  </View>
-                </View>
-              </TouchableOpacity>
-
-              {sheetActivePanel === 'budget' && (
-                <View style={{ paddingHorizontal: 14, paddingBottom: 14 }}>
-                  <Slider
-                    style={{ width: '100%', height: 40 }}
-                    minimumValue={1}
-                    maximumValue={50}
-                    step={1}
-                    value={monthlyAllocationPercent}
-                    onValueChange={val => {
-                      const v = Math.round(val);
-                      setMonthlyAllocationPercent(v);
-                      const pool = incomeBasisForSlider * (v / 100);
-                      setCustomDailyLimit(Math.floor(pool / 30));
-                    }}
-                    onSlidingComplete={async val => {
-                      const v = Math.round(val);
-                      const pool = Math.floor(incomeBasisForSlider * (v / 100));
-                      const daily = Math.floor(pool / 30);
-                      setMonthlyAllocationPercent(v);
-                      setCustomDailyLimit(daily);
-                      await updateUserSettingsFirestoreRecord({
-                        allocationPct: v,
-                        monthlyPool: pool,
-                        activeDailyBudget: daily,
-                      });
-                    }}
-                    minimumTrackTintColor="#6C63FF"
-                    maximumTrackTintColor="rgba(255,255,255,0.2)"
-                    thumbTintColor="#6C63FF"
-                  />
-                  <View
-                    style={{
-                      flexDirection: 'row',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                      marginTop: 8,
-                    }}
-                  >
-                    <Text style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)', flex: 1 }}>
-                      {monthlyAllocationPercent}% · ₹
-                      {Math.round((incomeBasisForSlider * monthlyAllocationPercent) / 100).toLocaleString('en-IN')}/mo
-                    </Text>
-                    <TouchableOpacity
-                      onPress={closeAll}
-                      style={{
-                        borderWidth: 1.5,
-                        borderColor: '#6C63FF',
-                        borderRadius: 20,
-                        paddingHorizontal: 20,
-                        paddingVertical: 6,
+                        fontSize: 14,
+                        fontFamily: FONT_MONO as string,
+                        fontWeight: '700',
+                        color: '#6C63FF',
                       }}
                     >
-                      <Text style={{ color: '#6C63FF', fontSize: 12, fontWeight: '600' }}>Done</Text>
-                    </TouchableOpacity>
+                      ₹{Math.round(previewDaily || 0).toLocaleString('en-IN')}/day
+                    </Text>
                   </View>
+
+                  {!confirmedIncome || confirmedIncome === 0 ? (
+                    <Text
+                      style={{
+                        fontSize: 12,
+                        color: 'rgba(255,255,255,0.5)',
+                        textAlign: 'center',
+                        marginVertical: 12,
+                      }}
+                    >
+                      Confirm your income first to set your daily budget
+                    </Text>
+                  ) : (
+                    <>
+                      <View
+                        onStartShouldSetResponder={() => true}
+                        onTouchStart={e => e.stopPropagation()}
+                      >
+                        <Slider
+                          style={{ width: '100%', height: 40 }}
+                          minimumValue={1}
+                          maximumValue={50}
+                          step={1}
+                          value={localAllocationPct}
+                          onValueChange={val => {
+                            const v = Math.round(val);
+                            const pool = Math.floor((confirmedIncome || 0) * (v / 100));
+                            setLocalAllocationPct(v);
+                            setPreviewDaily(Math.floor(pool / 30));
+                            setPreviewPool(pool);
+                          }}
+                          onSlidingComplete={val => {
+                            setLocalAllocationPct(Math.round(val));
+                          }}
+                          minimumTrackTintColor="#6C63FF"
+                          maximumTrackTintColor="rgba(255,255,255,0.15)"
+                          thumbTintColor="#6C63FF"
+                          tapToSeek
+                        />
+                      </View>
+                      <View
+                        style={{
+                          flexDirection: 'row',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          marginTop: 4,
+                        }}
+                      >
+                        <Text style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)', flex: 1 }}>
+                          {Math.round(localAllocationPct || 10)}% · ₹
+                          {Math.round(previewPool || 0).toLocaleString('en-IN')}/mo
+                        </Text>
+                        <TouchableOpacity
+                          onPress={() => {
+                            void handleBudgetDone();
+                          }}
+                          style={{
+                            borderWidth: 1.5,
+                            borderColor: '#6C63FF',
+                            borderRadius: 20,
+                            paddingHorizontal: 20,
+                            paddingVertical: 6,
+                            marginLeft: 12,
+                          }}
+                        >
+                          <Text style={{ color: '#6C63FF', fontSize: 12, fontWeight: '600' }}>Done</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </>
+                  )}
                 </View>
               )}
-            </View>
+            </Reanimated.View>
 
             <Reanimated.View
               style={[
                 {
-                  marginHorizontal: SIDE_MARGIN,
-                  marginBottom: 14,
                   backgroundColor: '#1E1E3A',
-                  borderRadius: 14,
                   overflow: 'hidden',
                   borderWidth: 1,
                   borderColor: 'rgba(255,170,0,0.15)',
                 },
+                stripCardBorderStyle,
+                pocketCardMarginStyle,
                 pocketAnimStyle,
               ]}
             >
-              <View
-                style={{
-                  height: 44,
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  paddingHorizontal: 14,
-                }}
-              >
-                <TouchableOpacity
-                  onPress={openPocket}
-                  activeOpacity={0.88}
-                  style={{
-                    flexDirection: 'row',
-                    alignItems: 'center',
-                    gap: 8,
-                    flex: 1,
-                  }}
+              <View style={{ flex: 1, position: 'relative' }}>
+                <Reanimated.View
+                  style={pocketCollapsedInnerStyle}
+                  pointerEvents={stripsInStackedLayout ? 'box-none' : 'none'}
                 >
-                  <Text style={{ fontSize: 16 }}>💛</Text>
-                  <Text
+                  <View
                     style={{
-                      fontSize: 10,
-                      textTransform: 'uppercase',
-                      letterSpacing: 1,
-                      color: 'rgba(255,255,255,0.45)',
+                      height: 44,
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      paddingHorizontal: 14,
                     }}
                   >
-                    POCKET
-                  </Text>
-                  <Text style={{ fontSize: 13, fontFamily: FONT_MONO as string, fontWeight: '600', color: '#FFAA00' }}>
-                    ₹{Math.round(pocketAvailable)}
-                  </Text>
-                </TouchableOpacity>
-                <Reanimated.View style={pocketButtonAnimStyle}>
-                  <TouchableOpacity
-                    onPressIn={handlePocketPressIn}
-                    onPressOut={handlePocketPressOut}
-                    activeOpacity={0.8}
-                    delayPressIn={0}
-                  >
-                    <View
-                      ref={sweepPillRef}
-                      collapsable={false}
+                    <TouchableOpacity
+                      onPress={openPocket}
+                      activeOpacity={0.88}
                       style={{
-                        backgroundColor: '#FFAA00',
-                        borderRadius: 20,
-                        paddingHorizontal: 14,
-                        paddingVertical: 7,
-                        shadowColor: '#FFAA00',
-                        shadowRadius: 8,
-                        shadowOpacity: 0.4,
-                        shadowOffset: { width: 0, height: 0 },
-                        elevation: 4,
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        gap: 8,
+                        flex: 1,
                       }}
                     >
+                      <Text style={{ fontSize: 16 }}>💛</Text>
                       <Text
                         style={{
-                          color: '#1A1A2E',
-                          fontSize: 11,
-                          fontWeight: '700',
-                          letterSpacing: 0.5,
+                          fontSize: 10,
+                          textTransform: 'uppercase',
+                          letterSpacing: 1,
+                          color: 'rgba(255,255,255,0.45)',
                         }}
                       >
-                        Pocket Now
+                        POCKET
                       </Text>
+                      <Text style={{ fontSize: 13, fontFamily: FONT_MONO as string, fontWeight: '600', color: '#FFAA00' }}>
+                        ₹{Math.round(pocketAvailable)}
+                      </Text>
+                    </TouchableOpacity>
+                    <Reanimated.View style={pocketButtonAnimStyle}>
+                      <TouchableOpacity
+                        onPressIn={handlePocketPressIn}
+                        onPressOut={handlePocketPressOut}
+                        activeOpacity={0.8}
+                        delayPressIn={0}
+                      >
+                        <View
+                          ref={sweepPillRef}
+                          collapsable={false}
+                          style={{
+                            backgroundColor: '#FFAA00',
+                            borderRadius: 20,
+                            paddingHorizontal: 14,
+                            paddingVertical: 7,
+                            shadowColor: '#FFAA00',
+                            shadowRadius: 8,
+                            shadowOpacity: 0.4,
+                            shadowOffset: { width: 0, height: 0 },
+                            elevation: 4,
+                          }}
+                        >
+                          <Text
+                            style={{
+                              color: '#1A1A2E',
+                              fontSize: 11,
+                              fontWeight: '700',
+                              letterSpacing: 0.5,
+                            }}
+                          >
+                            Pocket Now
+                          </Text>
+                        </View>
+                      </TouchableOpacity>
+                    </Reanimated.View>
+                  </View>
+                </Reanimated.View>
+                <Reanimated.View style={pocketExpandedInnerStyle} pointerEvents="none">
+                  <View
+                    style={{
+                      flex: 1,
+                      justifyContent: 'center',
+                      paddingHorizontal: EXPANDED_STRIP_PAD_X,
+                      paddingVertical: 4,
+                      flexDirection: 'column',
+                      alignItems: 'stretch',
+                    }}
+                  >
+                    <View
+                      style={{
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        gap: EXPANDED_STRIP_INNER_GAP,
+                        width: '100%',
+                      }}
+                    >
+                      <View
+                        style={{
+                          width: 32,
+                          height: 32,
+                          borderRadius: 8,
+                          backgroundColor: 'rgba(255,170,0,0.18)',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                        }}
+                      >
+                        <Ionicons name="wallet-outline" size={16} color="#FFAA00" />
+                      </View>
+                      <View style={{ flex: 1, minWidth: 0, justifyContent: 'center' }}>
+                        <Text
+                          style={{
+                            fontSize: 8,
+                            textTransform: 'uppercase',
+                            letterSpacing: 0.9,
+                            color: 'rgba(255,255,255,0.45)',
+                            fontFamily: FONT_UI as string,
+                            includeFontPadding: false,
+                          }}
+                          numberOfLines={1}
+                        >
+                          POCKET
+                        </Text>
+                        <Text
+                          style={{
+                            fontSize: 12,
+                            fontFamily: FONT_MONO as string,
+                            fontWeight: '700',
+                            color: '#FFFFFF',
+                            marginTop: 2,
+                            includeFontPadding: false,
+                          }}
+                          numberOfLines={1}
+                        >
+                          ₹{Math.round(pocketAvailable)}
+                        </Text>
+                      </View>
                     </View>
-                  </TouchableOpacity>
+                  </View>
                 </Reanimated.View>
               </View>
 
-              {sheetActivePanel === 'pocket' && (
-                <View style={{ paddingHorizontal: 14, paddingBottom: 14 }}>
+              {sheetActivePanel === 'pocket' && stripsInStackedLayout && (
+                <View
+                  style={{
+                    paddingHorizontal: 14,
+                    paddingTop: pocketPanelTopPadPx,
+                    paddingBottom: pocketPanelBottomPadPx,
+                  }}
+                >
                   <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
                     <Text
                       style={{
@@ -2348,7 +3241,15 @@ export const HomeScreen: React.FC = () => {
                       Future days ₹{Math.floor(pocketAvailable * ((100 - pocketSplitDraft) / 100))}
                     </Text>
                   </View>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <View
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      paddingBottom: 4,
+                      marginTop: pocketPanelAutoDoneOffsetPx,
+                    }}
+                  >
                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
                       <Text
                         style={{
@@ -2390,8 +3291,10 @@ export const HomeScreen: React.FC = () => {
                 </View>
               )}
             </Reanimated.View>
+            </Reanimated.View>
+            </Reanimated.View>
 
-            <View style={{ paddingHorizontal: 16, marginBottom: 12 }}>
+            <Reanimated.View style={[{ paddingHorizontal: 16, marginBottom: 12 }, recentActivityTopGapStyle]}>
               <View
                 style={{
                   flexDirection: 'row',
@@ -2444,7 +3347,11 @@ export const HomeScreen: React.FC = () => {
                 </View>
               </View>
 
-              {shownTransactions.length ? (
+              {txLoading ? (
+                <View style={{ alignItems: 'center', paddingVertical: 24 }}>
+                  <ActivityIndicator size="small" color={PURPLE} />
+                </View>
+              ) : shownTransactions.length ? (
                 shownTransactions.map((tx, i) => {
                   const [timeLine, catLine] = tx.sub.includes(' · ')
                     ? (tx.sub.split(' · ', 2) as [string, string])
@@ -2495,12 +3402,13 @@ export const HomeScreen: React.FC = () => {
                 })
               ) : (
                 <View style={s.emptyActivityWrap}>
-                  <Text style={s.emptyActivityTitle}>No recent activity yet</Text>
-                  <Text style={s.emptyActivitySub}>Add an income source to see live entries here.</Text>
+                  <Text style={s.emptyActivityTitle}>No transactions yet</Text>
+                  <Text style={s.emptyActivitySub}>Add an expense to see live entries here.</Text>
                 </View>
               )}
-            </View>
-          </ScrollView>
+            </Reanimated.View>
+          </Reanimated.ScrollView>
+          </View>
         </Animated.View>
       </View>
 
@@ -2552,7 +3460,34 @@ export const HomeScreen: React.FC = () => {
         </View>
       )}
 
-      {activeRootTab === 'Wealth' && (
+      {activeRootTab === 'Home' && activeNav === 'spend' && (
+        <View
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            zIndex: 40,
+            backgroundColor: '#0A0E17',
+          }}
+        >
+          <SpendingScreen
+            tabBarHeight={tabBarHeight}
+            activeDailyBudget={activeDailyBudget}
+            onBack={() => {
+              setActiveNav('home');
+              setActiveRootTab('Home');
+            }}
+            headerShieldPct={Math.round(shieldPercentage * 100)}
+            headerTrackPct={Math.round(trackPercentage * 100)}
+            headerBuildPct={Math.round(buildPercentage * 100)}
+            headerOvrScore={ovrScore}
+          />
+        </View>
+      )}
+
+      {activeRootTab === 'Wealth' && wealthSubRoute === 'investment' && (
         <View
           style={{
             position: 'absolute',
@@ -2565,10 +3500,53 @@ export const HomeScreen: React.FC = () => {
           }}
         >
           <WealthScreen
-            onBack={() => {
-              setActiveNav('home');
-              setActiveRootTab('Home');
-            }}
+            onBack={closeWealth}
+            headerShieldPct={Math.round(shieldPercentage * 100)}
+            headerTrackPct={Math.round(trackPercentage * 100)}
+            headerBuildPct={Math.round(buildPercentage * 100)}
+            headerOvrScore={ovrScore}
+          />
+        </View>
+      )}
+
+      {activeRootTab === 'Wealth' && wealthSubRoute === 'insurance' && (
+        <View
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            zIndex: 40,
+            backgroundColor: '#0A0E17',
+          }}
+        >
+          <WealthInsuranceScreen
+            onBack={closeWealth}
+            tabBarHeight={tabBarHeight}
+            headerShieldPct={Math.round(shieldPercentage * 100)}
+            headerTrackPct={Math.round(trackPercentage * 100)}
+            headerBuildPct={Math.round(buildPercentage * 100)}
+            headerOvrScore={ovrScore}
+          />
+        </View>
+      )}
+
+      {activeRootTab === 'Wealth' && wealthSubRoute === 'loans' && (
+        <View
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            zIndex: 40,
+            backgroundColor: '#0A0E17',
+          }}
+        >
+          <WealthLoansScreen
+            onBack={closeWealth}
+            tabBarHeight={tabBarHeight}
             headerShieldPct={Math.round(shieldPercentage * 100)}
             headerTrackPct={Math.round(trackPercentage * 100)}
             headerBuildPct={Math.round(buildPercentage * 100)}
@@ -2602,113 +3580,95 @@ export const HomeScreen: React.FC = () => {
         </View>
       )}
 
-      {/* ── Floating pill tab bar (matches Wealth-style sheet nav) ─ */}
-      <Animated.View style={[s.floatingFooter, { transform: [{ translateY: footerTranslateY }] }]} pointerEvents="box-none">
-        <View
-          style={{
-            position: 'absolute',
-            bottom: 0,
-            left: 0,
-            right: 0,
-            paddingTop: 6,
-            paddingBottom: Math.max(insets.bottom, Platform.OS === 'ios' ? 8 : 6),
-            paddingHorizontal: 14,
-            backgroundColor: 'transparent',
-          }}
-        >
-          <View
-            style={{
-              flexDirection: 'row',
-              alignItems: 'center',
-              backgroundColor: '#FFFFFF',
-              borderRadius: 20,
-              paddingVertical: 4,
-              paddingHorizontal: 4,
-              borderWidth: StyleSheet.hairlineWidth,
-              borderColor: 'rgba(26,26,46,0.06)',
-              shadowColor: '#000000',
-              shadowOffset: { width: 0, height: 4 },
-              shadowOpacity: 0.1,
-              shadowRadius: 12,
-              elevation: 8,
-            }}
-          >
-            {(
-              [
-                { name: 'Home' as const, screen: 'Home' as const, kind: 'ion' as const, active: 'home' as const, inactive: 'home-outline' as const },
-                { name: 'Spend' as const, screen: 'Spend' as const, kind: 'ion' as const, active: 'card' as const, inactive: 'card-outline' as const },
-                { name: 'Wealth' as const, screen: 'Wealth' as const, kind: 'ion' as const, active: 'wallet' as const, inactive: 'wallet-outline' as const },
-                { name: 'IE' as const, screen: 'IE' as const, kind: 'mci' as const, active: 'piggy-bank' as const, inactive: 'piggy-bank-outline' as const },
-                { name: 'More' as const, screen: 'More' as const, kind: 'ion' as const, active: 'ellipsis-horizontal' as const, inactive: 'ellipsis-horizontal' as const },
-              ] as const
-            ).map(tab => {
-              const isActive = footerActiveName === tab.name;
-              const blue = '#1E88FF';
-              const muted = '#1A1A2E';
-              return (
-                <TouchableOpacity
-                  key={tab.name}
-                  style={{ flex: 1, alignItems: 'center', justifyContent: 'center', minHeight: 44, paddingVertical: 2 }}
-                  onPress={() => navigateRoot(tab.screen)}
-                  activeOpacity={0.75}
-                >
-                  {isActive ? (
-                    <View
-                      style={{
-                        alignSelf: 'center',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        minWidth: 64,
-                        paddingHorizontal: 12,
-                        paddingVertical: 5,
-                        borderRadius: 14,
-                        backgroundColor: 'rgba(30, 136, 255, 0.14)',
-                        borderWidth: StyleSheet.hairlineWidth,
-                        borderColor: 'rgba(30, 136, 255, 0.28)',
-                      }}
-                    >
-                      {tab.kind === 'mci' ? (
-                        <MaterialCommunityIcons name={tab.active as 'piggy-bank'} size={19} color={blue} />
-                      ) : (
-                        <Ionicons name={tab.active} size={19} color={blue} />
-                      )}
-                      <Text style={{ fontSize: 9, fontWeight: '700', color: blue, marginTop: 2, fontFamily: FONT_UI as string }} numberOfLines={1}>
-                        {tab.name}
-                      </Text>
-                    </View>
-                  ) : (
-                    <View style={{ alignItems: 'center', justifyContent: 'center', paddingVertical: 4 }}>
-                      {tab.kind === 'mci' ? (
-                        <MaterialCommunityIcons name={tab.inactive as 'piggy-bank-outline'} size={19} color={muted} />
-                      ) : (
-                        <Ionicons name={tab.inactive} size={19} color={muted} />
-                      )}
-                      <Text style={{ fontSize: 9, fontWeight: '600', color: muted, marginTop: 2, fontFamily: FONT_UI as string }} numberOfLines={1}>
-                        {tab.name}
-                      </Text>
-                    </View>
-                  )}
-                </TouchableOpacity>
-              );
-            })}
-          </View>
-        </View>
-        {activeRootTab === 'Home' ? (
+      {/* ── Bottom bar: levitating glass pill, L1 ↔ Wealth L2 ─ */}
+      <View style={s.floatingFooter} pointerEvents="box-none">
+        {Platform.OS === 'web' ? (
           <View
             style={[
-              s.fabAbsWrap,
+              footerLevitatingShellBase,
               {
-                bottom: Math.max(insets.bottom, 8) + 52 + 8,
+                backgroundColor: 'rgba(255,255,255,0.78)',
+                borderColor: 'rgba(120, 125, 160, 0.4)',
+                borderWidth: 1.5,
               },
             ]}
-            pointerEvents="box-none"
           >
-            <TouchableOpacity style={s.fab} onPress={() => setIsExpenseModalVisible(true)} activeOpacity={0.85}>
-              <Text style={s.fabIcon}>+</Text>
-            </TouchableOpacity>
+            <View
+              pointerEvents="none"
+              style={[
+                StyleSheet.absoluteFillObject,
+                { borderRadius: FOOTER_NAV_OUTER_R, backgroundColor: 'rgba(255,255,255,0.35)' },
+              ]}
+            />
+            <View
+              pointerEvents="none"
+              style={{
+                position: 'absolute',
+                top: 1.5,
+                left: 1.5,
+                right: 1.5,
+                bottom: 1.5,
+                borderRadius: Math.max(FOOTER_NAV_OUTER_R - 1.5, 8),
+                borderWidth: 1,
+                borderColor: 'rgba(255,255,255,0.65)',
+              }}
+            />
+            <View style={{ position: 'relative', minHeight: FOOTER_NAV_OUTER_H }}>{footerPillNavInner}</View>
           </View>
-        ) : null}
-      </Animated.View>
+        ) : (
+          <View style={footerLevitatingShellBase}>
+            <BlurView
+              intensity={100}
+              tint="light"
+              style={[StyleSheet.absoluteFillObject, { borderRadius: FOOTER_NAV_OUTER_R }]}
+            />
+            <View
+              style={[
+                StyleSheet.absoluteFillObject,
+                { borderRadius: FOOTER_NAV_OUTER_R, backgroundColor: 'rgba(255,255,255,0.18)' },
+              ]}
+            />
+            <View
+              pointerEvents="none"
+              style={[
+                StyleSheet.absoluteFillObject,
+                { borderRadius: FOOTER_NAV_OUTER_R, backgroundColor: 'rgba(255,255,255,0.1)' },
+              ]}
+            />
+            <View
+              pointerEvents="none"
+              style={{
+                position: 'absolute',
+                top: 1.5,
+                left: 1.5,
+                right: 1.5,
+                bottom: 1.5,
+                borderRadius: Math.max(FOOTER_NAV_OUTER_R - 1.5, 8),
+                borderWidth: 1,
+                borderColor: 'rgba(255,255,255,0.55)',
+              }}
+            />
+            <View style={{ position: 'relative', minHeight: FOOTER_NAV_OUTER_H }}>{footerPillNavInner}</View>
+          </View>
+        )}
+        <Reanimated.View style={footerAnimatedStyle} pointerEvents="box-none">
+          {activeRootTab === 'Home' && activeNav === 'home' ? (
+            <View
+              style={[
+                s.fabAbsWrap,
+                {
+                  bottom: tabBarHeight + 12,
+                },
+              ]}
+              pointerEvents="box-none"
+            >
+              <TouchableOpacity style={s.fab} onPress={() => setIsExpenseModalVisible(true)} activeOpacity={0.85}>
+                <Text style={s.fabIcon}>+</Text>
+              </TouchableOpacity>
+            </View>
+          ) : null}
+        </Reanimated.View>
+      </View>
 
       <Modal
         visible={isExpenseModalVisible}
